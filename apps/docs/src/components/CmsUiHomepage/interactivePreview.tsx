@@ -30,6 +30,7 @@ interface TourModule {
   docsUrl: string;
 }
 
+// Interactive showcase with aspect-ratio locked preview and deep links to guides
 export function InteractivePreview() {
   const [activeKey, setActiveKey] = useState<ModuleKey>('canvas');
 
