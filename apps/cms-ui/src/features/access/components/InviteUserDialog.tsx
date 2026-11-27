@@ -2,15 +2,17 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { browserLogger } from '@repo/logger/browser';
 import { accessApi } from '../api/access.api';
-import {
+import type {
   InviteUserPayload,
   Role,
   InviteUserDialogProps,
 } from '../types/access.types';
 import { Button, FormField, Typography } from '@repo/shared-ui';
 import { X, Copy, Check } from 'lucide-react';
+import { useCmsToast } from '@/hooks/useCmsToast';
 
 export const InviteUserDialog = ({ onClose }: InviteUserDialogProps) => {
+  const toast = useCmsToast();
   const queryClient = useQueryClient();
   const [formData, setFormData] = useState<InviteUserPayload>({
     email: '',
@@ -37,7 +39,7 @@ export const InviteUserDialog = ({ onClose }: InviteUserDialogProps) => {
     },
     onError: (error) => {
       browserLogger.error('Failed to invite user', error);
-      alert('Failed to invite user');
+      toast.error('Failed to invite user. Please try again.');
     },
   });
   const handleCopy = async () => {

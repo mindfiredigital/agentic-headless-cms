@@ -12,7 +12,6 @@ import { WebhookRecord } from '@repo/types';
 import {
   Button,
   Input,
-  Checkbox,
   Modal,
   DataTable,
   Dropdown,
@@ -22,12 +21,58 @@ import {
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Trash2, History, MoreVertical, Radio, Plus } from 'lucide-react';
 import { WebhookDeliveriesDrawer } from './webhook-deliveries-drawer';
+import { WebhookEventsCombobox } from './webhook-events-combobox';
 
-const AVAILABLE_EVENTS = [
-  'content.published',
-  'content.updated',
-  'content.deleted',
-  'media.uploaded',
+const EVENT_CATEGORIES = [
+  {
+    category: 'Content Lifecycle',
+    events: [
+      {
+        id: 'content.created',
+        description: 'When a new draft entry is created',
+      },
+      {
+        id: 'content.updated',
+        description: 'When an entry is modified or updated',
+      },
+      {
+        id: 'content.published',
+        description: 'When an entry is published live',
+      },
+      {
+        id: 'content.unpublished',
+        description: 'When an entry is reverted from published',
+      },
+      { id: 'content.deleted', description: 'When an entry is deleted' },
+    ],
+  },
+  {
+    category: 'Editorial Workflow',
+    events: [
+      {
+        id: 'workflow.transition',
+        description: 'When an entry transitions between any workflow stages',
+      },
+      {
+        id: 'workflow.review_requested',
+        description: 'When an entry is submitted for editorial review',
+      },
+      {
+        id: 'workflow.approved',
+        description: 'When an entry is approved by an assigned reviewer',
+      },
+      {
+        id: 'workflow.changes_requested',
+        description: 'When a reviewer requests changes on an entry',
+      },
+    ],
+  },
+  {
+    category: 'Media Assets',
+    events: [
+      { id: 'media.uploaded', description: 'When a media asset is uploaded' },
+    ],
+  },
 ];
 
 export function WebhooksTable() {
@@ -79,14 +124,6 @@ export function WebhooksTable() {
     setEvents([]);
   };
 
-  const toggleEvent = (event: string) => {
-    setEvents((prev) =>
-      prev.includes(event)
-        ? prev.filter((e: string) => e !== event)
-        : [...prev, event],
-    );
-  };
-
   return (
     <div className="flex flex-col gap-4">
       {/* Top Header Row with Action */}
@@ -95,18 +132,22 @@ export function WebhooksTable() {
           Endpoints listening for content and system mutations
         </div>
         <Button
+          aria-label="+ Register"
           onClick={() => setIsCreateOpen(true)}
           className="gap-1.5"
           size="sm"
         >
           <Plus className="size-4" />
-          <span>Register Webhook</span>
+          <span>Register</span>
         </Button>
       </div>
 
       <Modal
         isOpen={isCreateOpen}
         onClose={closeDialog}
+        size="lg"
+        className="min-h-[540px] sm:min-h-[580px]"
+        bodyClassName="px-6 py-4 flex flex-col"
         title="Register Webhook"
         confirmText={createMutation.isPending ? 'Registering...' : 'Register'}
         cancelText="Cancel"
@@ -116,8 +157,12 @@ export function WebhooksTable() {
           }
         }}
         onCancel={closeDialog}
+        colorOverrides={{
+          confirmButton:
+            'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm border border-primary/20',
+        }}
       >
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 flex flex-col flex-1 min-h-[380px]">
           <div className="space-y-2">
             <label className="text-sm font-medium">Name</label>
             <Input
@@ -137,27 +182,25 @@ export function WebhooksTable() {
             />
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Events</label>
-            <div className="space-y-2">
-              {AVAILABLE_EVENTS.map((event) => (
-                <label
-                  key={event}
-                  className="flex items-center gap-2 text-sm cursor-pointer"
-                >
-                  <Checkbox
-                    checked={events.includes(event)}
-                    onChange={() => toggleEvent(event)}
-                  />
-                  <span>{event}</span>
-                </label>
-              ))}
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Events</label>
+              {events.length > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  {events.length} selected
+                </span>
+              )}
             </div>
+            <WebhookEventsCombobox
+              categories={EVENT_CATEGORIES}
+              selectedEvents={events}
+              onChange={setEvents}
+            />
           </div>
         </div>
       </Modal>
 
       {/* Main Table Container matching Audit Log */}
-      <div className="rounded-xl border border-border/80 bg-card/60 backdrop-blur-sm shadow-sm overflow-hidden">
+      <div className="rounded-xl border border-border/80 bg-card/60 backdrop-blur-sm shadow-sm overflow-hidden w-full max-w-full min-w-0">
         {isLoading && !webhooksData ? (
           <div className="p-6 space-y-4 animate-pulse">
             <div className="h-8 bg-muted/60 rounded-md w-full" />
@@ -199,7 +242,7 @@ export function WebhooksTable() {
                 </span>
               ),
               url: (
-                <div className="flex items-center max-w-[180px] sm:max-w-xs min-w-0">
+                <div className="flex items-center max-w-[200px] sm:max-w-xs min-w-0">
                   <span
                     className="truncate font-mono text-xs text-muted-foreground"
                     title={webhook.url}
@@ -232,27 +275,7 @@ export function WebhooksTable() {
                 </Badge>
               ),
               actions: (
-                <div className="flex items-center justify-end gap-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground hidden sm:inline-flex"
-                    onClick={() => setSelectedWebhookForDeliveries(webhook)}
-                    title="Delivery History"
-                    aria-label="Delivery History"
-                  >
-                    <History className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                    onClick={() => setPendingDelete(webhook)}
-                    title="Delete Webhook"
-                    aria-label="Delete Webhook"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
+                <div className="flex items-center justify-end">
                   <Dropdown
                     align="end"
                     trigger={
@@ -261,6 +284,7 @@ export function WebhooksTable() {
                         size="sm"
                         className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
                         title="Actions"
+                        aria-label="Open menu"
                       >
                         <span className="sr-only">Open menu</span>
                         <MoreVertical className="h-4 w-4" />
@@ -309,7 +333,11 @@ export function WebhooksTable() {
             page={page}
             pageCount={webhooksData?.meta?.pagination?.pageCount ?? 1}
             pageSize={pageSize}
-            onPageSizeChange={(newSize: number) => setPageSize(newSize)}
+            rowsPerPageOptions={[5, 10, 20, 25, 50]}
+            onPageSizeChange={(newSize: number) => {
+              setPageSize(newSize);
+              setPage(1);
+            }}
             onPageChange={(newPage: number) => setPage(newPage)}
             emptyMessage="No webhooks match your search criteria."
           />

@@ -97,6 +97,8 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
   ) => {
     const [isChecked, setIsChecked] = React.useState(defaultChecked || false);
     const internalChecked = checked !== undefined ? checked : isChecked;
+    const generatedId = React.useId();
+    const inputId = props.id || generatedId;
 
     const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       if (checked === undefined) {
@@ -172,11 +174,13 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
       >
         <input
           type="checkbox"
+          id={inputId}
           ref={ref}
           checked={internalChecked}
           onChange={handleChange}
           disabled={disabled}
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          aria-label={label}
           {...props}
         />
 
@@ -210,6 +214,7 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
 
     const CheckboxLabel = label && (
       <motion.label
+        htmlFor={inputId}
         className={cn(labelVariants({ size, disabled }), 'select-none')}
         onClick={(e: React.MouseEvent<HTMLLabelElement>) => {
           e.preventDefault();
@@ -248,11 +253,13 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
           >
             <input
               type="checkbox"
+              id={inputId}
               ref={ref}
               checked={internalChecked}
               onChange={handleChange}
               disabled={disabled}
               className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              aria-label={label}
               {...props}
             />
 

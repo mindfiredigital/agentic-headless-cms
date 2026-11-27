@@ -1,13 +1,15 @@
 import { eq, and, or, isNull, sql, desc, SQL } from 'drizzle-orm';
 import { getDatabaseAdapter } from '@repo/config';
 import { logger } from '@repo/logger';
-import { ApiError } from '@repo/utils';
+import { ApiError, BadRequestError, HttpError } from '@repo/utils';
 import {
   schemas,
   contentEntries,
   contentVersions,
   entryLocalizations,
   users,
+  contentWorkflowStates,
+  applications,
   createEntryVersion,
   withTransaction,
   RecordNotFoundError,
@@ -16,10 +18,53 @@ import { DEFAULT_LOCALE } from '@repo/constants';
 import type { ContentQueryOptions } from '@repo/types';
 import { isDeepStrictEqual } from 'node:util';
 import { REPO_ERRORS } from './error-constants.js';
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertValidUuid(value: string, label: string = 'entry ID'): void {
+  if (!UUID_REGEX.test(value)) {
+    throw new BadRequestError(`Invalid ${label} format.`);
+  }
+}
+
+function rethrowKnownRepoError(error: unknown): void {
+  if (
+    error instanceof ApiError ||
+    error instanceof HttpError ||
+    error instanceof RecordNotFoundError
+  ) {
+    throw error;
+  }
+  if (error && typeof error === 'object') {
+    const err = error as { code?: unknown; cause?: { code?: unknown } };
+    if (err.code === '22P02' || err.cause?.code === '22P02') {
+      throw new BadRequestError('Invalid entry ID format.');
+    }
+  }
+}
+
 export class ContentRepository {
   private get db() {
     return getDatabaseAdapter().getDb();
   }
+  async getApplicationByName(name: string) {
+    try {
+      const [app] = await this.db
+        .select({ id: applications.id, name: applications.name })
+        .from(applications)
+        .where(eq(applications.name, name))
+        .limit(1);
+      return app ?? null;
+    } catch (error) {
+      logger.error(
+        { err: error, name },
+        'ContentRepository: getApplicationByName failed',
+      );
+      throw new ApiError(500, 'Failed to fetch application');
+    }
+  }
+
   async getSchemaBySlug(slug: string, applicationId?: string) {
     try {
       logger.info(
@@ -81,10 +126,18 @@ export class ContentRepository {
           schemaId: contentEntries.schemaId,
           locale: entryLocalizations.locale,
           status: entryLocalizations.status,
+          workflowStage: contentWorkflowStates.currentStage,
           data: entryLocalizations.data,
           publishedData: entryLocalizations.publishedData,
           createdAt: contentEntries.createdAt,
           updatedAt: contentEntries.updatedAt,
+          createdByUserId: contentEntries.createdByUserId,
+          createdBy: sql<
+            string | null
+          >`COALESCE(NULLIF(TRIM(CONCAT(${users.firstName}, ' ', ${users.lastName})), ''), ${users.email}, 'Admin')`.as(
+            'createdBy',
+          ),
+          createdByEmail: users.email,
           updatedBy: sql<
             string | null
           >`COALESCE(${contentEntries.updatedBy}, ${users.email}, 'Admin')`.as(
@@ -103,6 +156,10 @@ export class ContentRepository {
             eq(contentEntries.id, entryLocalizations.entryId),
             eq(entryLocalizations.locale, locale),
           ),
+        )
+        .leftJoin(
+          contentWorkflowStates,
+          eq(contentEntries.id, contentWorkflowStates.entryId),
         )
         .leftJoin(users, eq(contentEntries.createdByUserId, users.id))
         .where(where);
@@ -163,6 +220,10 @@ export class ContentRepository {
               eq(entryLocalizations.locale, locale),
             ),
           )
+          .leftJoin(
+            contentWorkflowStates,
+            eq(contentEntries.id, contentWorkflowStates.entryId),
+          )
           .where(where);
       });
       logger.debug(
@@ -186,6 +247,7 @@ export class ContentRepository {
         { entryId, locale, schemaId, applicationId },
         'ContentRepository: fetching entry by ID',
       );
+      assertValidUuid(entryId, 'entry ID');
       const conditions = [
         eq(contentEntries.id, entryId),
         isNull(contentEntries.deletedAt),
@@ -203,11 +265,19 @@ export class ContentRepository {
             schemaId: contentEntries.schemaId,
             locale: entryLocalizations.locale,
             status: entryLocalizations.status,
+            workflowStage: contentWorkflowStates.currentStage,
             data: entryLocalizations.data,
             publishedData: entryLocalizations.publishedData,
             publishedAt: entryLocalizations.publishedAt,
             createdAt: contentEntries.createdAt,
             updatedAt: contentEntries.updatedAt,
+            createdByUserId: contentEntries.createdByUserId,
+            createdBy: sql<
+              string | null
+            >`COALESCE(NULLIF(TRIM(CONCAT(${users.firstName}, ' ', ${users.lastName})), ''), ${users.email}, 'Admin')`.as(
+              'createdBy',
+            ),
+            createdByEmail: users.email,
             updatedBy: sql<
               string | null
             >`COALESCE(${contentEntries.updatedBy}, ${users.email}, 'Admin')`.as(
@@ -227,6 +297,10 @@ export class ContentRepository {
               eq(entryLocalizations.locale, locale),
             ),
           )
+          .leftJoin(
+            contentWorkflowStates,
+            eq(contentEntries.id, contentWorkflowStates.entryId),
+          )
           .leftJoin(users, eq(contentEntries.createdByUserId, users.id))
           .where(and(...conditions))
           .limit(1);
@@ -237,8 +311,50 @@ export class ContentRepository {
       );
       return entry || null;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error({ err: error }, 'ContentRepository Error in getEntryById:');
       throw new ApiError(500, REPO_ERRORS.FETCH_ENTRY_FAILED);
+    }
+  }
+  /**
+   * Creates a draft entry on behalf of nobody in particular (a website
+   * visitor sending a form or a comment). It is recorded as a system action.
+   */
+  async createSystemEntry(
+    schemaId: string,
+    data: Record<string, unknown>,
+    applicationId: string,
+    locale: string = DEFAULT_LOCALE,
+  ) {
+    try {
+      return await withTransaction(this.db, async (tx) => {
+        const [newEntry] = await tx
+          .insert(contentEntries)
+          .values({
+            schemaId,
+            applicationId,
+            actorType: 'system',
+            updatedBy: 'Website visitor',
+            collaborators: JSON.stringify(['Website visitor']),
+          })
+          .returning();
+        if (!newEntry) throw new ApiError(500, REPO_ERRORS.CREATE_ENTRY_FAILED);
+        await createEntryVersion(tx, {
+          entryId: newEntry.id,
+          locale,
+          data,
+          status: 'draft',
+          actorType: 'system',
+          comment: 'Sent from the website',
+        });
+        return { id: newEntry.id };
+      });
+    } catch (error) {
+      logger.error(
+        { err: error },
+        'ContentRepository Error in createSystemEntry:',
+      );
+      throw new ApiError(500, REPO_ERRORS.CREATE_ENTRY_FAILED);
     }
   }
   async createEntry(
@@ -256,6 +372,15 @@ export class ContentRepository {
       return await withTransaction(this.db, async (tx) => {
         logger.debug('ContentRepository: inserting contentEntries row');
         const actor = options.userEmail || userId;
+        let resolvedAppId = options.applicationId;
+        if (!resolvedAppId) {
+          const [schemaRecord] = await tx
+            .select({ applicationId: schemas.applicationId })
+            .from(schemas)
+            .where(eq(schemas.id, schemaId))
+            .limit(1);
+          resolvedAppId = schemaRecord?.applicationId;
+        }
         const [newEntry] = await tx
           .insert(contentEntries)
           .values({
@@ -264,9 +389,7 @@ export class ContentRepository {
             createdByUserId: userId,
             updatedBy: actor,
             collaborators: JSON.stringify([actor]),
-            ...(options.applicationId
-              ? { applicationId: options.applicationId }
-              : {}),
+            ...(resolvedAppId ? { applicationId: resolvedAppId } : {}),
           })
           .returning();
         if (!newEntry) {
@@ -322,6 +445,7 @@ export class ContentRepository {
         { entryId, userId, locale },
         'ContentRepository: updating entry draft',
       );
+      assertValidUuid(entryId, 'entry ID');
       const currentEntry = await this.getEntryById(entryId, locale);
       if (currentEntry && isDeepStrictEqual(currentEntry.data, data)) {
         logger.debug('ContentRepository: no changes detected, skipping update');
@@ -377,6 +501,7 @@ export class ContentRepository {
       logger.info({ entryId }, 'ContentRepository: updateEntryDraft complete');
       return updatedEntry;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error(
         { err: error },
         'ContentRepository Error in updateEntryDraft:',
@@ -395,6 +520,7 @@ export class ContentRepository {
         { entryId, userId, locale },
         'ContentRepository: publishing entry',
       );
+      assertValidUuid(entryId, 'entry ID');
       const entry = await this.getEntryById(entryId, locale);
       if (!entry) {
         logger.error(
@@ -453,8 +579,8 @@ export class ContentRepository {
       logger.info({ entryId }, 'ContentRepository: publishEntry complete');
       return publishedEntry;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error({ err: error }, 'ContentRepository Error in publishEntry:');
-      if (error instanceof RecordNotFoundError) throw error;
       throw new ApiError(500, REPO_ERRORS.PUBLISH_ENTRY_FAILED);
     }
   }
@@ -469,6 +595,7 @@ export class ContentRepository {
         { entryId, userId, locale },
         'ContentRepository: unpublishing entry',
       );
+      assertValidUuid(entryId, 'entry ID');
       const entry = await this.getEntryById(entryId, locale);
       if (!entry) {
         throw new RecordNotFoundError('Entry not found');
@@ -538,13 +665,11 @@ export class ContentRepository {
       logger.info({ entryId }, 'ContentRepository: unpublishEntry complete');
       return unpublishedEntry;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error(
         { err: error },
         'ContentRepository Error in unpublishEntry:',
       );
-      if (error instanceof RecordNotFoundError || error instanceof ApiError) {
-        throw error;
-      }
       throw new ApiError(500, 'Failed to unpublish entry');
     }
   }
@@ -559,6 +684,7 @@ export class ContentRepository {
         { entryId, versionNo, userId, locale },
         'ContentRepository: reverting entry',
       );
+      assertValidUuid(entryId, 'entry ID');
       const [historical] = await withTransaction(this.db, async (tx) => {
         return await tx
           .select({ data: contentVersions.data })
@@ -600,8 +726,8 @@ export class ContentRepository {
       logger.info({ entryId }, 'ContentRepository: revertEntry complete');
       return revertedEntry;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error({ err: error }, 'ContentRepository Error in revertEntry:');
-      if (error instanceof RecordNotFoundError) throw error;
       throw new ApiError(500, REPO_ERRORS.REVERT_ENTRY_FAILED);
     }
   }
@@ -611,6 +737,7 @@ export class ContentRepository {
         { entryId, locale },
         'ContentRepository: listing entry versions',
       );
+      assertValidUuid(entryId, 'entry ID');
       const versions = await withTransaction(this.db, async (tx) => {
         return await tx
           .select()
@@ -629,6 +756,7 @@ export class ContentRepository {
       );
       return versions;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error(
         { err: error },
         'ContentRepository Error in listEntryVersions:',
@@ -642,6 +770,7 @@ export class ContentRepository {
         { entryId, applicationId },
         'ContentRepository: deleting entry',
       );
+      assertValidUuid(entryId, 'entry ID');
       const conditions = [eq(contentEntries.id, entryId)];
       if (applicationId) {
         conditions.push(eq(contentEntries.applicationId, applicationId));
@@ -663,8 +792,8 @@ export class ContentRepository {
       logger.info({ entryId }, 'ContentRepository: deleteEntry complete');
       return deleted;
     } catch (error) {
+      rethrowKnownRepoError(error);
       logger.error({ err: error }, 'ContentRepository Error in deleteEntry:');
-      if (error instanceof RecordNotFoundError) throw error;
       throw new ApiError(500, REPO_ERRORS.DELETE_ENTRY_FAILED);
     }
   }

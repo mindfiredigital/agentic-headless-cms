@@ -20,11 +20,17 @@ export interface PaginationMeta {
 export interface ContentEntryRecord {
   id: string;
   status: 'draft' | 'published';
+  workflowStage?: string | null;
   data: Record<string, unknown>;
   publishedData: Record<string, unknown> | null;
   publishedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
+  createdBy?: string | null;
+  createdByEmail?: string | null;
+  createdByUserId?: string | null;
+  updatedBy?: string | null;
+  collaborators?: string | null;
 }
 
 export interface ContentVersionRecord {

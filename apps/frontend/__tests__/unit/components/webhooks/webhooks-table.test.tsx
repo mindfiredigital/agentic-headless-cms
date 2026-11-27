@@ -74,7 +74,7 @@ describe('WebhooksTable', () => {
     await screen.findByText('No webhooks registered yet.');
 
     // 1. Submit empty
-    await user.click(screen.getByRole('button', { name: 'Register Webhook' }));
+    await user.click(screen.getByRole('button', { name: '+ Register' }));
     let registerButton = await screen.findByRole('button', {
       name: 'Register',
     });
@@ -82,7 +82,7 @@ describe('WebhooksTable', () => {
     expect(mockCreate).not.toHaveBeenCalled();
 
     // 2. Submit with only name and url (modal closed, so open again)
-    await user.click(screen.getByRole('button', { name: 'Register Webhook' }));
+    await user.click(screen.getByRole('button', { name: '+ Register' }));
     fireEvent.change(
       await screen.findByPlaceholderText('e.g. Next.js ISR Rebuild'),
       { target: { value: 'My Hook' } },
@@ -96,7 +96,7 @@ describe('WebhooksTable', () => {
     expect(mockCreate).not.toHaveBeenCalled();
 
     // 3. Submit with everything
-    await user.click(screen.getByRole('button', { name: 'Register Webhook' }));
+    await user.click(screen.getByRole('button', { name: '+ Register' }));
     fireEvent.change(
       await screen.findByPlaceholderText('e.g. Next.js ISR Rebuild'),
       { target: { value: 'My Hook' } },
@@ -104,6 +104,9 @@ describe('WebhooksTable', () => {
     fireEvent.change(
       await screen.findByPlaceholderText('https://example.com/api/revalidate'),
       { target: { value: 'https://example.com/hook' } },
+    );
+    await user.click(
+      screen.getByRole('button', { name: /select events to subscribe/i }),
     );
     await user.click(screen.getByText('content.published'));
     registerButton = await screen.findByRole('button', { name: 'Register' });
@@ -117,7 +120,7 @@ describe('WebhooksTable', () => {
     renderTable();
     await screen.findByText('No webhooks registered yet.');
 
-    await user.click(screen.getByRole('button', { name: 'Register Webhook' }));
+    await user.click(screen.getByRole('button', { name: '+ Register' }));
     fireEvent.change(
       await screen.findByPlaceholderText('e.g. Next.js ISR Rebuild'),
       { target: { value: 'My Hook' } },
@@ -125,6 +128,9 @@ describe('WebhooksTable', () => {
     fireEvent.change(
       await screen.findByPlaceholderText('https://example.com/api/revalidate'),
       { target: { value: 'https://example.com/hook' } },
+    );
+    await user.click(
+      screen.getByRole('button', { name: /select events to subscribe/i }),
     );
     await user.click(screen.getByText('content.published'));
 
@@ -166,5 +172,52 @@ describe('WebhooksTable', () => {
     // Open 3-dot dropdown menu
     await user.click(screen.getByRole('button', { name: /open menu/i }));
     expect(screen.getByText(/delivery history/i)).toBeInTheDocument();
+  });
+
+  it('allows multi-selecting, searching, and removing events via the combobox', async () => {
+    const user = userEvent.setup();
+    renderTable();
+    await screen.findByText('No webhooks registered yet.');
+
+    await user.click(screen.getByRole('button', { name: '+ Register' }));
+
+    // Open combobox
+    const comboboxTrigger = screen.getByRole('button', {
+      name: /select events to subscribe/i,
+    });
+    await user.click(comboboxTrigger);
+
+    // Filter events by typing in search
+    const searchInput = screen.getByPlaceholderText(/filter events/i);
+    await user.type(searchInput, 'published');
+
+    expect(screen.getByText('content.published')).toBeInTheDocument();
+    expect(screen.queryByText('content.created')).not.toBeInTheDocument();
+
+    // Select the filtered event
+    await user.click(screen.getByText('content.published'));
+
+    // Clear search
+    await user.clear(searchInput);
+    expect(screen.getByText('content.created')).toBeInTheDocument();
+
+    // Select a second event
+    await user.click(screen.getByText('content.created'));
+
+    // Close combobox via Done
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+
+    // Badges are rendered in the trigger
+    expect(screen.getByText('content.published')).toBeInTheDocument();
+    expect(screen.getByText('content.created')).toBeInTheDocument();
+
+    // Remove one event using badge remove button
+    const removeBtn = screen.getByRole('button', {
+      name: 'Remove event content.created',
+    });
+    await user.click(removeBtn);
+
+    expect(screen.getByText('content.published')).toBeInTheDocument();
+    expect(screen.queryByText('content.created')).not.toBeInTheDocument();
   });
 });

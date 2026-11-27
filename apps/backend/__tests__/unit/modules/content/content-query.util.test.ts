@@ -176,6 +176,17 @@ describe('parseContentQuery', () => {
     expect(result.orderBy).toHaveLength(1);
   });
 
+  it('allows sorting on workflowStage base column', () => {
+    const ascResult = parseContentQuery({ sort: 'workflowStage:asc' }, fields);
+    expect(ascResult.orderBy).toHaveLength(1);
+
+    const descResult = parseContentQuery(
+      { sort: 'workflowStage:desc' },
+      fields,
+    );
+    expect(descResult.orderBy).toHaveLength(1);
+  });
+
   it('rejects an invalid sort direction', () => {
     expect(() => parseContentQuery({ sort: 'title:sideways' }, fields)).toThrow(
       /Invalid sort direction/,
@@ -227,5 +238,21 @@ describe('parseContentQuery', () => {
     );
     expect(result.search).toBe('hello');
     expect(result.where).toBeDefined();
+  });
+});
+
+describe('kind filters', () => {
+  it('accepts a list of kinds to keep or leave out', () => {
+    expect(
+      () => parseContentQuery({ kind: 'post,page' }, [], 'all').where,
+    ).not.toThrow();
+    const q = parseContentQuery({ excludeKind: 'submission,menus' }, [], 'all');
+    expect(q.where).toBeDefined();
+  });
+  it('rejects anything that is not a plain kind name', () => {
+    expect(() => parseContentQuery({ kind: "a'b" }, [], 'all')).toThrow();
+    expect(() =>
+      parseContentQuery({ excludeKind: 'x;drop table' }, [], 'all'),
+    ).toThrow();
   });
 });

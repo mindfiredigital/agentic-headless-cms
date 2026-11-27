@@ -1,16 +1,39 @@
 import { ContentRepository } from '@repo/repository';
-import { DEFAULT_LOCALE } from '@repo/constants';
+import {
+  DEFAULT_LOCALE,
+  ERROR_MESSAGES,
+  EVENT_NAMES,
+  AUDIT_ACTIONS,
+} from '@repo/constants';
 import { logger } from '@repo/logger';
 import { eventBus } from '@repo/events';
-import { EVENT_NAMES, AUDIT_ACTIONS } from '@repo/constants';
 import type { ContentQueryOptions } from '@repo/types';
-import { ApiError } from '@repo/utils';
+import { ApiError, HttpError } from '@repo/utils';
+import { DatabaseError } from '@repo/shared-db';
 import { getAuditContext } from '../../utils/audit.js';
 import { SERVICE_ERRORS } from '../../utils/error-constants.js';
+import { WorkflowsService } from '../workflows/workflows.service.js';
+
+function rethrowKnownContentError(error: unknown): void {
+  if (
+    error instanceof ApiError ||
+    error instanceof HttpError ||
+    error instanceof DatabaseError
+  ) {
+    throw error;
+  }
+}
+
 export class ContentService {
   private repository: ContentRepository;
-  constructor() {
-    this.repository = new ContentRepository();
+  private workflowsService: WorkflowsService;
+
+  constructor(
+    repository?: ContentRepository,
+    workflowsService?: WorkflowsService,
+  ) {
+    this.repository = repository ?? new ContentRepository();
+    this.workflowsService = workflowsService ?? new WorkflowsService();
   }
   async listEntries(
     schemaId: string,
@@ -30,6 +53,7 @@ export class ContentService {
         applicationId,
       );
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in listEntries:');
       throw new ApiError(500, SERVICE_ERRORS.LIST_ENTRIES_FAILED);
     }
@@ -52,6 +76,7 @@ export class ContentService {
         applicationId,
       );
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in countEntries:');
       throw new ApiError(500, SERVICE_ERRORS.COUNT_ENTRIES_FAILED);
     }
@@ -74,6 +99,7 @@ export class ContentService {
         applicationId,
       );
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in getEntryById:');
       throw new ApiError(500, SERVICE_ERRORS.FETCH_ENTRY_FAILED);
     }
@@ -85,6 +111,7 @@ export class ContentService {
     locale: string = DEFAULT_LOCALE,
     applicationId?: string,
     userEmail?: string,
+    options?: { requiresReview?: boolean },
   ) {
     try {
       logger.info({ schemaId, userId }, 'ContentService: createDraft start');
@@ -95,6 +122,17 @@ export class ContentService {
         locale,
         { applicationId, userEmail },
       );
+      if (
+        typeof this.workflowsService?.initializeEntryWorkflow === 'function'
+      ) {
+        await this.workflowsService.initializeEntryWorkflow(
+          result.id,
+          schemaId,
+          userId,
+          applicationId,
+          options?.requiresReview ?? true,
+        );
+      }
       logger.debug(
         { id: result.id },
         'ContentService: createDraft success, emitting audit log',
@@ -112,6 +150,7 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in createDraft:');
       throw new ApiError(500, SERVICE_ERRORS.CREATE_DRAFT_FAILED);
     }
@@ -122,6 +161,9 @@ export class ContentService {
     userId: string,
     locale: string = DEFAULT_LOCALE,
     userEmail?: string,
+    applicationId?: string,
+    schemaId?: string,
+    options?: { requiresReview?: boolean },
   ) {
     try {
       logger.info({ entryId, userId }, 'ContentService: updateDraft start');
@@ -130,13 +172,48 @@ export class ContentService {
       const beforeState = await this.repository.getEntryById(entryId, locale);
       // Perform mutation
       logger.debug({ entryId }, 'ContentService: mutating data');
+      const beforeData = beforeState?.data as
+        | Record<string, unknown>
+        | undefined;
+      const finalData = { ...data };
+      if (beforeData?.body && finalData.body === undefined) {
+        finalData.body = beforeData.body;
+      }
       const result = await this.repository.updateEntryDraft(
         entryId,
-        data,
+        finalData,
         userId,
         locale,
         userEmail,
       );
+
+      // Auto-demotion guard: Reset in-review or approved entry back to initial stage on content edit
+      const targetSchemaId = schemaId || beforeState?.schemaId;
+      if (
+        targetSchemaId &&
+        typeof this.workflowsService?.handleContentUpdated === 'function'
+      ) {
+        await this.workflowsService.handleContentUpdated(
+          entryId,
+          targetSchemaId,
+          { id: userId, email: userEmail },
+          applicationId,
+        );
+      }
+
+      if (
+        targetSchemaId &&
+        typeof options?.requiresReview === 'boolean' &&
+        typeof this.workflowsService?.setEntryWorkflowMode === 'function'
+      ) {
+        await this.workflowsService.setEntryWorkflowMode(
+          entryId,
+          targetSchemaId,
+          options.requiresReview,
+          { id: userId },
+          applicationId,
+        );
+      }
       // Emit audit event
       logger.debug({ entryId }, 'ContentService: emitting audit log');
       const { actorUserId, actorAgentId, context } = getAuditContext();
@@ -152,6 +229,7 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in updateDraft:');
       throw new ApiError(500, SERVICE_ERRORS.UPDATE_DRAFT_FAILED);
     }
@@ -162,6 +240,8 @@ export class ContentService {
     userId: string,
     locale: string = DEFAULT_LOCALE,
     userEmail?: string,
+    applicationId?: string,
+    schemaId?: string,
   ) {
     try {
       logger.info({ entryId, userId }, 'ContentService: updatePartial start');
@@ -177,6 +257,20 @@ export class ContentService {
         locale,
         userEmail,
       );
+
+      // Auto-demotion guard: Reset in-review or approved entry back to initial stage on content edit
+      const targetSchemaId = schemaId || beforeState?.schemaId;
+      if (
+        targetSchemaId &&
+        typeof this.workflowsService?.handleContentUpdated === 'function'
+      ) {
+        await this.workflowsService.handleContentUpdated(
+          entryId,
+          targetSchemaId,
+          { id: userId, email: userEmail },
+          applicationId,
+        );
+      }
       const { actorUserId, actorAgentId, context } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.UPDATE,
@@ -190,6 +284,7 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in updatePartial:');
       throw new ApiError(500, 'Failed to partially update entry.');
     }
@@ -199,9 +294,26 @@ export class ContentService {
     userId: string,
     locale: string = DEFAULT_LOCALE,
     userEmail?: string,
+    schemaId?: string,
+    applicationId?: string,
   ) {
     try {
       logger.info({ entryId, userId }, 'ContentService: publishEntry start');
+
+      if (schemaId && typeof this.workflowsService?.canPublish === 'function') {
+        const isAllowed = await this.workflowsService.canPublish(
+          entryId,
+          schemaId,
+          applicationId,
+        );
+        if (!isAllowed) {
+          throw new ApiError(
+            400,
+            ERROR_MESSAGES.WORKFLOWS.WORKFLOW_APPROVAL_REQUIRED,
+          );
+        }
+      }
+
       // Capture BEFORE state
       logger.debug({ entryId }, 'ContentService: fetching beforeState');
       const beforeState = await this.repository.getEntryById(entryId, locale);
@@ -228,6 +340,7 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in publishEntry:');
       throw new ApiError(500, SERVICE_ERRORS.PUBLISH_ENTRY_FAILED);
     }
@@ -237,6 +350,8 @@ export class ContentService {
     userId: string,
     locale: string = DEFAULT_LOCALE,
     userEmail?: string,
+    applicationId?: string,
+    schemaId?: string,
   ) {
     try {
       logger.info({ entryId, userId }, 'ContentService: unpublishEntry start');
@@ -247,6 +362,21 @@ export class ContentService {
         locale,
         userEmail,
       );
+
+      // Reset workflow stage to Draft upon unpublish
+      const targetSchemaId = beforeState?.schemaId || schemaId;
+      if (
+        typeof this.workflowsService?.handleEntryUnpublished === 'function' &&
+        targetSchemaId
+      ) {
+        await this.workflowsService.handleEntryUnpublished(
+          entryId,
+          targetSchemaId,
+          { id: userId },
+          applicationId,
+        );
+      }
+
       const { actorUserId, actorAgentId, context } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.UNPUBLISH,
@@ -260,8 +390,8 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in unpublishEntry:');
-      if (error instanceof ApiError) throw error;
       throw new ApiError(500, SERVICE_ERRORS.UNPUBLISH_ENTRY_FAILED);
     }
   }
@@ -303,6 +433,7 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in revertEntry:');
       throw new ApiError(500, SERVICE_ERRORS.REVERT_ENTRY_FAILED);
     }
@@ -312,6 +443,7 @@ export class ContentService {
       logger.info({ entryId, locale }, 'ContentService: listEntryVersions');
       return await this.repository.listEntryVersions(entryId, locale);
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error(
         { err: error },
         'ContentService Error in listEntryVersions:',
@@ -351,6 +483,7 @@ export class ContentService {
       });
       return result;
     } catch (error) {
+      rethrowKnownContentError(error);
       logger.error({ err: error }, 'ContentService Error in deleteEntry:');
       throw new ApiError(500, SERVICE_ERRORS.DELETE_ENTRY_FAILED);
     }

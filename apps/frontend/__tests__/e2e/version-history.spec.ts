@@ -36,24 +36,26 @@ test('version history lists prior versions and can restore one', async ({
   await page.getByLabel('Title *').fill('Version One');
   await page.getByRole('button', { name: 'Save Draft', exact: true }).click();
 
-  const viewHistoryButton = page.getByRole('button', { name: 'View history' });
+  const moreActionsButton = page.getByRole('button', { name: 'More actions' });
 
-  await expect(viewHistoryButton).toBeVisible({ timeout: 15_000 });
+  await expect(moreActionsButton).toBeVisible({ timeout: 15_000 });
   await expect(page).toHaveURL(new RegExp(`/content/${slug}/(?!new$)[^/]+$`));
 
   await page.getByLabel('Title *').fill('Version Two');
   await page.getByRole('button', { name: 'Save Draft', exact: true }).click();
   await expect(page.getByLabel('Title *')).toHaveValue('Version Two');
 
-  await viewHistoryButton.click();
+  await moreActionsButton.click();
+  await page.getByRole('menuitem', { name: 'View history' }).click();
+  const drawer = page.getByRole('dialog');
   await expect(
-    page.getByRole('heading', { name: 'Version History' }),
+    drawer.getByRole('heading', { name: 'Version History' }),
   ).toBeVisible();
-  await expect(page.getByText('v2', { exact: true })).toBeVisible();
-  await expect(page.getByText('v1', { exact: true })).toBeVisible();
+  await expect(drawer.getByText('v2', { exact: true })).toBeVisible();
+  await expect(drawer.getByText('v1', { exact: true })).toBeVisible();
 
-  await page.getByText('v1', { exact: true }).click();
-  await page.getByRole('button', { name: 'Restore v1' }).click();
+  await drawer.getByText('v1', { exact: true }).click();
+  await drawer.getByRole('button', { name: 'Restore v1' }).click();
 
   await page.reload();
   await expect(page.getByLabel('Title *')).toHaveValue('Version One');

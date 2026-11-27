@@ -2,16 +2,41 @@ import { Request, Response, RequestHandler } from 'express';
 import { ContentService } from './content.service.js';
 import { parseContentQuery } from './query/content-query.util.js';
 import { logger } from '@repo/logger';
-import { asyncHandler, ApiResponse, ApiError } from '@repo/utils';
+import {
+  asyncHandler,
+  ApiResponse,
+  ApiError,
+  BadRequestError,
+  ForbiddenError,
+} from '@repo/utils';
 import { DEFAULT_LOCALE, ERROR_MESSAGES } from '@repo/constants';
 import type { SchemaDefinition } from '@repo/types';
+import {
+  hasCapability,
+  canUserPublish,
+  type CapPermission,
+} from '../auth/capability.js';
 import { webhookDispatcher } from '../webhooks/webhook-dispatcher.service.js';
+import { WorkflowsService } from '../workflows/workflows.service.js';
+import { transitionEntryValidationSchema } from '@repo/validation';
+
 const contentService = new ContentService();
+const workflowsService = new WorkflowsService();
 function checkAuthorizedForDrafts(req: Request, schemaId?: string): boolean {
   const userRoles = (req.user?.roles || []).map((r: string) => r.toLowerCase());
   if (
     userRoles.some((r: string) =>
       ['admin', 'super_admin', 'editor', 'author'].includes(r),
+    )
+  ) {
+    return true;
+  }
+  // Roles built from capabilities (writers, publishers) may see drafts too
+  if (
+    hasCapability(
+      (req.user?.permissions || []) as unknown as CapPermission[],
+      ['manage_content', 'publish_content', 'manage_appearance'],
+      schemaId,
     )
   ) {
     return true;
@@ -183,6 +208,11 @@ export const createDraft: RequestHandler = asyncHandler(
     const userId = req.user!.id;
     const userEmail = req.user?.email || req.user?.firstName || req.user?.id;
     logger.debug({ schemaId, userId }, 'ContentController: creating draft');
+    const requiresReviewQuery = req.query.requiresReview;
+    const requiresReview =
+      typeof requiresReviewQuery === 'string'
+        ? requiresReviewQuery === 'true'
+        : undefined;
     const entry = await contentService.createDraft(
       schemaId,
       req.body as Record<string, unknown>,
@@ -190,10 +220,21 @@ export const createDraft: RequestHandler = asyncHandler(
       locale,
       req.context?.applicationId,
       userEmail,
+      { requiresReview },
     );
     logger.info(
       { schemaId, entryId: entry.id },
       'ContentController: createDraft end',
+    );
+    void webhookDispatcher.dispatch(
+      'content.created',
+      {
+        schemaSlug: req.params.schemaSlug,
+        entryId: entry.id,
+        entry,
+        locale,
+      },
+      req.context?.applicationId,
     );
     res
       .status(201)
@@ -209,12 +250,20 @@ export const updateDraft: RequestHandler = asyncHandler(
     const userId = req.user!.id;
     const userEmail = req.user?.email || req.user?.firstName || req.user?.id;
     logger.debug({ entryId, userId }, 'ContentController: updating draft');
+    const requiresReviewQuery = req.query.requiresReview;
+    const requiresReview =
+      typeof requiresReviewQuery === 'string'
+        ? requiresReviewQuery === 'true'
+        : undefined;
     const entry = await contentService.updateDraft(
       entryId as string,
       req.body as Record<string, unknown>,
       userId,
       locale,
       userEmail,
+      req.context?.applicationId,
+      req.schemaId,
+      { requiresReview },
     );
     logger.info({ entryId }, 'ContentController: updateDraft end');
     void webhookDispatcher.dispatch(
@@ -250,6 +299,8 @@ export const updatePartialEntry: RequestHandler = asyncHandler(
       userId,
       locale,
       userEmail,
+      req.context?.applicationId,
+      req.schemaId,
     );
     logger.info({ entryId }, 'ContentController: updatePartialEntry end');
     void webhookDispatcher.dispatch(
@@ -283,6 +334,8 @@ export const publishEntry: RequestHandler = asyncHandler(
       userId,
       locale,
       userEmail,
+      req.schemaId,
+      req.context?.applicationId,
     );
     logger.info({ entryId }, 'ContentController: publishEntry end');
     void webhookDispatcher.dispatch(
@@ -314,10 +367,12 @@ export const unpublishEntry: RequestHandler = asyncHandler(
       userId,
       locale,
       userEmail,
+      req.context?.applicationId,
+      req.schemaId,
     );
     logger.info({ entryId }, 'ContentController: unpublishEntry end');
     void webhookDispatcher.dispatch(
-      'content.unpublish',
+      'content.unpublished',
       {
         schemaSlug: req.params.schemaSlug,
         entryId,
@@ -384,5 +439,109 @@ export const deleteEntry: RequestHandler = asyncHandler(
       req.context?.applicationId,
     );
     res.status(204).end();
+  },
+);
+
+export const getWorkflowState: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { entryId } = req.params;
+    logger.info({ entryId }, 'ContentController: getWorkflowState start');
+    const state = await workflowsService.getEntryWorkflowState(
+      entryId as string,
+      req.schemaId!,
+      req.user,
+      req.context?.applicationId,
+    );
+    res
+      .status(200)
+      .json(
+        new ApiResponse(200, state, 'Workflow state retrieved successfully'),
+      );
+  },
+);
+
+export const transitionEntry: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { entryId } = req.params;
+    logger.info({ entryId }, 'ContentController: transitionEntry start');
+    const parseResult = transitionEntryValidationSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      throw new BadRequestError(
+        parseResult.error.issues.map((e) => e.message).join(', '),
+      );
+    }
+    const state = await workflowsService.transitionEntry(
+      entryId as string,
+      req.schemaId!,
+      parseResult.data,
+      req.user!,
+      req.context?.applicationId,
+    );
+    res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          state,
+          'Workflow transition executed successfully',
+        ),
+      );
+  },
+);
+
+export const updateWorkflowMode: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { entryId } = req.params;
+    const body = req.body as { requiresReview?: unknown };
+    const requiresReview = body?.requiresReview;
+    logger.info(
+      { entryId, requiresReview },
+      'ContentController: updateWorkflowMode start',
+    );
+
+    if (typeof requiresReview !== 'boolean') {
+      throw new BadRequestError('requiresReview boolean is required');
+    }
+
+    if (requiresReview === false) {
+      const isAuthorizedPublisher = await canUserPublish(req);
+      if (!isAuthorizedPublisher) {
+        throw new ForbiddenError(
+          'Only users with publish permission can enable Direct Publish mode.',
+        );
+      }
+    }
+
+    const state = await workflowsService.setEntryWorkflowMode(
+      entryId as string,
+      req.schemaId!,
+      requiresReview,
+      req.user,
+      req.context?.applicationId,
+    );
+
+    res
+      .status(200)
+      .json(new ApiResponse(200, state, 'Workflow mode updated successfully'));
+  },
+);
+
+export const getWorkflowHistory: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { entryId } = req.params;
+    logger.info({ entryId }, 'ContentController: getWorkflowHistory start');
+    const history = await workflowsService.getWorkflowHistory(
+      entryId as string,
+      req.context?.applicationId,
+    );
+    res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          history,
+          'Workflow history retrieved successfully',
+        ),
+      );
   },
 );

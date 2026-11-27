@@ -12,10 +12,13 @@ import { LinkPlugin } from '@lexical/react/LexicalLinkPlugin';
 
 import {
   type EditorState,
+  type LexicalEditor,
   FORMAT_TEXT_COMMAND,
   $getSelection,
   $isRangeSelection,
   $createParagraphNode,
+  $getRoot,
+  $createTextNode,
 } from 'lexical';
 import {
   HeadingNode,
@@ -43,11 +46,61 @@ import {
   Link2,
   Pilcrow,
 } from 'lucide-react';
-import type * as React from 'react';
+import * as React from 'react';
+import { useEffect } from 'react';
 import type { LexicalRichTextFieldProps } from '@/types/component.types';
 
 import { Button } from '@repo/shared-ui';
 import { cn } from '@/lib/utils';
+
+function ValueSyncPlugin({ value }: { value?: string }) {
+  const [editor] = useLexicalComposerContext();
+  const lastSerializedRef = React.useRef(value);
+
+  useEffect(() => {
+    if (value === undefined) return;
+    if (value === lastSerializedRef.current) return;
+
+    editor.getEditorState().read(() => {
+      const current = JSON.stringify(editor.getEditorState().toJSON());
+      if (current !== value) {
+        lastSerializedRef.current = value;
+        if (!value || value.trim() === '') {
+          editor.update(() => {
+            const root = $getRoot();
+            root.clear();
+            const p = $createParagraphNode();
+            root.append(p);
+          });
+          return;
+        }
+
+        try {
+          const parsed = editor.parseEditorState(value);
+          editor.setEditorState(parsed);
+        } catch {
+          editor.update(() => {
+            const root = $getRoot();
+            root.clear();
+            const p = $createParagraphNode();
+            p.append($createTextNode(value));
+            root.append(p);
+          });
+        }
+      }
+    });
+  }, [editor, value]);
+
+  return null;
+}
+
+function EditablePlugin({ disabled }: { disabled?: boolean }) {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => {
+    editor.setEditable(!disabled);
+  }, [editor, disabled]);
+  return null;
+}
 
 function Toolbar({ disabled }: { disabled?: boolean }) {
   const [editor] = useLexicalComposerContext();
@@ -87,7 +140,7 @@ function Toolbar({ disabled }: { disabled?: boolean }) {
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-1 border-b bg-muted/20 p-1.5">
+    <div className="flex flex-wrap items-center gap-1 border-b bg-muted/20 p-1.5 w-full min-w-0">
       {/* Inline text formatting */}
       <Button
         type="button"
@@ -258,6 +311,24 @@ export function LexicalRichTextField({
   'aria-describedby': ariaDescribedBy,
   'aria-invalid': ariaInvalid,
 }: LexicalRichTextFieldProps) {
+  const initialValueRef = React.useRef(value);
+  const getInitialEditorState = React.useCallback((editor: LexicalEditor) => {
+    const initial = initialValueRef.current;
+    if (!initial || !initial.trim()) return;
+    try {
+      const parsed = editor.parseEditorState(initial);
+      editor.setEditorState(parsed);
+    } catch {
+      editor.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode(initial));
+        root.append(p);
+      });
+    }
+  }, []);
+
   return (
     <LexicalComposer
       initialConfig={{
@@ -266,13 +337,14 @@ export function LexicalRichTextField({
         nodes: EDITOR_NODES,
         editable: !disabled,
         onError,
-        editorState: value || undefined,
+        editorState: getInitialEditorState,
       }}
     >
       <div
         className={cn(
-          'rounded-md border bg-background overflow-hidden',
-          disabled && 'opacity-50',
+          'rounded-md border bg-background overflow-hidden w-full min-w-0',
+          disabled &&
+            'bg-muted/20 border-border/70 text-foreground cursor-default select-text',
         )}
       >
         <Toolbar disabled={disabled} />
@@ -296,6 +368,8 @@ export function LexicalRichTextField({
           <ListPlugin />
           <LinkPlugin />
           <HistoryPlugin />
+          <EditablePlugin disabled={disabled} />
+          <ValueSyncPlugin value={value} />
           <OnChangePlugin
             onChange={(editorState: EditorState) =>
               onChange(JSON.stringify(editorState.toJSON()))

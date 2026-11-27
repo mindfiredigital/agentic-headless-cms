@@ -74,13 +74,27 @@ export interface SchemaLineage {
   forkedSlugs?: string[];
 }
 
+export type TemplateCategory =
+  | 'ecommerce'
+  | 'retail'
+  | 'saas'
+  | 'portfolio'
+  | 'blog'
+  | 'editorial'
+  | 'real-estate'
+  | 'restaurant'
+  | 'course'
+  | 'education'
+  | 'custom'
+  | (string & {});
+
 export interface SchemaMetadata {
   is_public?: boolean;
   parent_schema_id?: string;
   parent_schema_name?: string;
   parent_schema_slug?: string;
   fork_count?: number;
-  category?: 'ecommerce' | 'blog' | 'real-estate' | 'course' | 'custom';
+  category?: TemplateCategory;
   tags?: string[];
   version?: string;
   [key: string]: unknown;
@@ -196,7 +210,7 @@ export interface PageLayoutTemplate {
 export interface CrossSiteSharedTemplate {
   id: string;
   title: string;
-  category: 'ecommerce' | 'blog' | 'real-estate' | 'course' | 'custom';
+  category: TemplateCategory;
   description: string;
   schema: DynamicSchemaDefinition;
   layoutHtml?: string;
@@ -258,6 +272,22 @@ export interface PageSideDrawerProps {
     publishImmediately: boolean,
   ) => Promise<void>;
   isSaving: boolean;
+}
+
+export type PostStatusFilter = 'all' | 'published' | 'draft';
+
+export interface WhatToPostDispatcherModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  siteName: string;
+  pages: PageEntry[];
+  /** Blog types set up on this website. */
+  blogs: Array<{ pageId: string; name: string; postLabel: string }>;
+  onSelectBlog: (pageId: string) => void;
+  /** When false the blog option explains how to turn blogging on. */
+  blogEnabled?: boolean;
+  settingsHref?: string;
+  onSelectPageForm: (pageId: string) => void;
 }
 
 export type {

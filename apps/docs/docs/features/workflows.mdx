@@ -1,0 +1,48 @@
+---
+title: Workflows & Approvals
+sidebar_label: Workflows & Approvals
+description: Multi-stage content approval pipelines, four-eyes editorial governance, and concurrency protection.
+sidebar_position: 4
+---
+
+**Workflows & Approvals** enforce structured editorial review and approval pipelines before content goes live. Administrators can customize stage progressions, restrict review capabilities by role, prevent self-approvals, and track full audit histories for compliance.
+
+---
+
+## Workflow Stages & Lifecycle
+
+A typical editorial workflow moves entries through structured lifecycle stages:
+
+| Stage | Default Action | Access & Rules | Description |
+| :--- | :--- | :--- | :--- |
+| **Draft** | Submit for Review | Content Author | Initial authoring and revisions. Changes remain private to authorized users. |
+| **In Review** | Approve / Request Changes | Authorized Reviewers | Content is locked in the review queue. |
+| **Approved** | Publish Live | Editors & Admins | Content is signed off and unlocked for public API distribution. |
+
+---
+
+## Governance Rules
+
+Every workflow transition runs through several integrity checks:
+
+- **No Self-Approvals**: An author or recent editor cannot approve their own entry (`403 Forbidden`). Approvals must come from a separate reviewer.
+- **Edits Reset Approval**: Modifying an approved entry before it goes live automatically resets its status back to `In Review` so unreviewed changes cannot be published.
+- **Denied Transition Logs**: Any blocked attempt (like self-approvals or unauthorized transitions) is recorded in the workflow history and audit trail with the rejection reason.
+
+---
+
+## Approvals Dashboard & Review Queue
+
+Reviewers and editorial managers manage pending submissions via the dedicated **Approvals** portal (`/approvals`):
+
+1. **Review Queue**: Filter entries pending sign-off across schemas and stages.
+2. **Reviewer Notes & Feedback**: Reviewers can provide contextual feedback when requesting changes or approving an entry.
+3. **Workflow History Drawer**: Inspect a complete, timestamped timeline of every stage movement, actor identity, review note, and denied attempt.
+
+---
+
+## How It Works
+
+1. **Attach Workflow**: Enable workflows on target content schemas in the **Schema Builder**.
+2. **Submit for Review**: When an author finishes drafting an entry, clicking **Submit for Review** moves the entry to `In Review`.
+3. **Review & Sign-Off**: An independent reviewer evaluates the submission. Once approved, the entry is unlocked for live publishing. If revisions are required, **Request Changes** returns the entry to draft status with reviewer feedback.

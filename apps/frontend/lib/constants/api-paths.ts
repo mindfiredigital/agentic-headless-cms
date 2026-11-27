@@ -44,10 +44,15 @@ export const API_PATHS = {
     BY_ID: (id: string) => `/api/v1/webhooks/${id}`,
     TEST: (id: string) => `/api/v1/webhooks/${id}/test`,
     DELIVERIES: (id: string) => `/api/v1/webhooks/${id}/deliveries`,
+    RETRY_DELIVERY: (id: string, deliveryId: string) =>
+      `/api/v1/webhooks/${id}/deliveries/${deliveryId}/retry`,
+    REPLAY_DELIVERY: (id: string, deliveryId: string) =>
+      `/api/v1/webhooks/${id}/deliveries/${deliveryId}/replay`,
   },
   LOCALES: {
     BASE: '/api/v1/locales',
     BY_ID: (id: string) => `/api/v1/locales/${id}`,
+    SET_DEFAULT: (id: string) => `/api/v1/locales/${id}/default`,
   },
   CONTENT: {
     BASE: (schemaSlug: string, qs?: string) =>
@@ -62,6 +67,25 @@ export const API_PATHS = {
       `/api/v1/content/${schemaSlug}/${entryId}/revert`,
     VERSIONS: (schemaSlug: string, entryId: string) =>
       `/api/v1/content/${schemaSlug}/${entryId}/versions`,
+    WORKFLOW_STATE: (schemaSlug: string, entryId: string) =>
+      `/api/v1/content/${schemaSlug}/${entryId}/workflow-state`,
+    WORKFLOW_MODE: (schemaSlug: string, entryId: string) =>
+      `/api/v1/content/${schemaSlug}/${entryId}/workflow-mode`,
+    TRANSITION: (schemaSlug: string, entryId: string) =>
+      `/api/v1/content/${schemaSlug}/${entryId}/transition`,
+    WORKFLOW_HISTORY: (schemaSlug: string, entryId: string) =>
+      `/api/v1/content/${schemaSlug}/${entryId}/workflow-history`,
+  },
+  WORKFLOWS: {
+    BASE: (qs?: string) => `/api/v1/workflows${qs ? `?${qs}` : ''}`,
+    PENDING_REVIEWS: (limit?: number) =>
+      `/api/v1/workflows/pending-reviews${limit ? `?limit=${limit}` : ''}`,
+    BY_ID: (id: string) => `/api/v1/workflows/${id}`,
+    ASSIGN_SCHEMA: (workflowId: string, schemaId: string) =>
+      `/api/v1/workflows/${workflowId}/schemas/${schemaId}`,
+    REMOVE_SCHEMA: (schemaId: string) =>
+      `/api/v1/workflows/schemas/${schemaId}`,
+    BY_SCHEMA: (schemaId: string) => `/api/v1/workflows/schema/${schemaId}`,
   },
   AUDIT_LOGS: {
     BASE: '/api/v1/audit-logs',

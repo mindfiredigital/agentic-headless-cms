@@ -33,6 +33,39 @@ import { getAuditContext } from '../../utils/audit.js';
 import { SERVICE_ERRORS } from '../../utils/error-constants.js';
 export class AuthService {
   private oidcClient: Client | null = null;
+  private createAuthSession(
+    user: {
+      id: string;
+      email: string;
+      firstName?: string | null;
+      lastName?: string | null;
+      mfaEnabled: boolean;
+    },
+    roles: string[],
+    permissions: Awaited<ReturnType<typeof authRepository.getUserPermissions>>,
+    mfaEnabled: boolean = user.mfaEnabled,
+  ) {
+    // Keep session cookies compact (< 4 KB browser limit); live permissions are
+    // resolved from the database per request and returned in JSON auth responses.
+    const tokenPayload = {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName ?? null,
+      lastName: user.lastName ?? null,
+      roles,
+      mfaEnabled,
+    };
+    const token = jwt.sign(tokenPayload, env.JWT_SECRET, {
+      expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+    });
+    return {
+      user: {
+        ...tokenPayload,
+        permissions,
+      },
+      token,
+    };
+  }
   private async getOidcClient(): Promise<Client> {
     if (this.oidcClient) return this.oidcClient;
     if (
@@ -148,33 +181,20 @@ export class AuthService {
         authRepository.getUserRoles(user.id, appId),
         authRepository.getUserPermissions(user.id, appId),
       ]);
-      const payload = {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        roles,
-        permissions,
-        mfaEnabled: user.mfaEnabled,
-      };
-      const token = jwt.sign(payload, env.JWT_SECRET, {
-        expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
-      });
-      const { context } = getAuditContext();
+      const session = this.createAuthSession(user, roles, permissions);
+      const { context, applicationId: ctxAppId } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.LOGIN,
         resourceType: 'user',
         resourceId: user.id,
         actorUserId: user.id,
         actorAgentId: undefined,
+        applicationId: ctxAppId || appId,
         beforeState: null,
         afterState: { email: user.email, sso: true, isNewUser },
         context,
       });
-      return {
-        user: payload,
-        token,
-      };
+      return session;
     } catch (error) {
       logger.error({ err: error }, 'AuthService Error in ssoCallback:');
       if (error instanceof UnauthorizedError) throw error;
@@ -238,38 +258,25 @@ export class AuthService {
         user.id,
         appId,
       );
-      const payload = {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        roles,
-        permissions,
-        mfaEnabled: user.mfaEnabled,
-      };
       logger.debug({ userId: user.id }, 'AuthService: signing JWT token');
-      const token = jwt.sign(payload, env.JWT_SECRET, {
-        expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
-      });
+      const session = this.createAuthSession(user, roles, permissions);
       logger.debug(
         { userId: user.id },
         'AuthService: login successful, emitting audit log',
       );
-      const { context } = getAuditContext();
+      const { context, applicationId: ctxAppId } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.LOGIN,
         resourceType: 'user',
         resourceId: user.id,
         actorUserId: user.id,
         actorAgentId: undefined,
+        applicationId: ctxAppId || appId,
         beforeState: null,
         afterState: { email: user.email },
         context,
       });
-      return {
-        user: payload,
-        token,
-      };
+      return session;
     } catch (error) {
       logger.error({ err: error }, 'AuthService Error in login:');
       if (error instanceof UnauthorizedError) throw error;
@@ -320,13 +327,14 @@ export class AuthService {
         { userId: user.id },
         'AuthService: acceptInvite successful, emitting audit log',
       );
-      const { context } = getAuditContext();
+      const { context, applicationId: ctxAppId } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.UPDATE,
         resourceType: 'user',
         resourceId: user.id,
         actorUserId: user.id,
         actorAgentId: undefined,
+        applicationId: ctxAppId,
         beforeState: { status: 'invited' },
         afterState: { status: 'active' },
         context,
@@ -385,19 +393,7 @@ export class AuthService {
         authRepository.getUserRoles(userId, appId),
         authRepository.getUserPermissions(userId, appId),
       ]);
-      const payload = {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        roles,
-        permissions,
-        mfaEnabled: true,
-      };
-      const token = jwt.sign(payload, env.JWT_SECRET, {
-        expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
-      });
-      return { user: payload, token };
+      return this.createAuthSession(user, roles, permissions, true);
     } catch (error) {
       logger.error({ err: error }, 'AuthService Error in verifyMfa:');
       if (error instanceof BadRequestError) throw error;
@@ -417,19 +413,7 @@ export class AuthService {
         authRepository.getUserRoles(userId, appId),
         authRepository.getUserPermissions(userId, appId),
       ]);
-      const payload = {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        roles,
-        permissions,
-        mfaEnabled: false,
-      };
-      const token = jwt.sign(payload, env.JWT_SECRET, {
-        expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
-      });
-      return { user: payload, token };
+      return this.createAuthSession(user, roles, permissions, false);
     } catch (error) {
       logger.error({ err: error }, 'AuthService Error in disableMfa:');
       if (error instanceof BadRequestError) throw error;
@@ -480,35 +464,22 @@ export class AuthService {
         authRepository.getUserRoles(user.id, appId),
         authRepository.getUserPermissions(user.id, appId),
       ]);
-      const payload = {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        roles,
-        permissions,
-        mfaEnabled: true,
-      };
       logger.debug({ userId: user.id }, 'AuthService: signing session JWT');
-      const token = jwt.sign(payload, env.JWT_SECRET, {
-        expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
-      });
+      const session = this.createAuthSession(user, roles, permissions, true);
       // Emit login event since the challenge is now complete
-      const { context } = getAuditContext();
+      const { context, applicationId: ctxAppId } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.LOGIN,
         resourceType: 'user',
         resourceId: user.id,
         actorUserId: user.id,
         actorAgentId: undefined,
+        applicationId: ctxAppId || appId,
         beforeState: null,
         afterState: { email: user.email, mfaCompleted: true },
         context,
       });
-      return {
-        user: payload,
-        token,
-      };
+      return session;
     } catch (error) {
       logger.error({ err: error }, 'AuthService Error in verifyMfaChallenge:');
       if (error instanceof UnauthorizedError) throw error;
@@ -722,13 +693,14 @@ export class AuthService {
         { userId: request.userId },
         'AuthService: password reset completed successfully',
       );
-      const { context } = getAuditContext();
+      const { context, applicationId: ctxAppId } = getAuditContext();
       eventBus.emit(EVENT_NAMES.AUDIT_LOG, {
         action: AUDIT_ACTIONS.UPDATE,
         resourceType: 'user',
         resourceId: request.userId,
         actorUserId: request.userId,
         actorAgentId: undefined,
+        applicationId: ctxAppId,
         beforeState: null,
         afterState: { passwordReset: true },
         context,

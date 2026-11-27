@@ -217,6 +217,7 @@ interface TableRowProps {
    * Current filter query for highlighting.
    */
   filterQuery: string;
+  onRowClick?: (row: AdvancedTableRow, index: number) => void;
 }
 
 /**
@@ -226,13 +227,15 @@ interface TableRowProps {
  * @internal
  */
 const TableRow: React.FC<TableRowProps> = memo(
-  ({ row, rowIndex, columns, filterQuery }) => {
+  ({ row, rowIndex, columns, filterQuery, onRowClick }) => {
     return (
       <tr
+        onClick={onRowClick ? () => onRowClick(row, rowIndex) : undefined}
         className={cn(
           'border-b border-border transition-colors',
           rowIndex % 2 === 1 ? 'bg-muted/40' : 'bg-background',
           'hover:bg-primary/5',
+          onRowClick && 'cursor-pointer',
         )}
       >
         {columns.map((column) => {
@@ -523,6 +526,7 @@ export interface AdvancedTableProps {
    * Default: "No rows match your filter."
    */
   emptyMessage?: React.ReactNode;
+  onRowClick?: (row: AdvancedTableRow, index: number) => void;
 }
 
 /**
@@ -578,8 +582,8 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
   filterPlaceholder = 'Filter rows...',
   enablePagination = true,
   initialPage = 1,
-  initialRowsPerPage = 5,
-  rowsPerPageOptions = [5, 10, 20],
+  initialRowsPerPage = 10,
+  rowsPerPageOptions = [5, 10, 20, 25, 50],
   manualPagination,
   manualSorting,
   manualFiltering,
@@ -593,6 +597,7 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
   onSearchChange: manualOnSearchChange,
   searchValue,
   emptyMessage = 'No rows match your filter.',
+  onRowClick,
 }) => {
   const effectiveRows = rows;
   const effectiveColumns = columns;
@@ -904,18 +909,18 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
           ? Math.min(activePage * rowsPerPage, totalFilteredCount)
           : totalFilteredCount;
 
-  /**
-   * Array of page numbers for pagination controls.
-   * Memoized to avoid recalculating on every render.
-   */
-  const pageNumbers = useMemo(() => {
-    if (!enablePagination) return [];
-    const pages: number[] = [];
-    for (let i = 1; i <= totalPages; i += 1) {
-      pages.push(i);
-    }
-    return pages;
-  }, [enablePagination, totalPages]);
+  const isFilterActive =
+    Boolean(filterQuery && filterQuery.trim()) ||
+    (manualFiltering && totalFilteredCount !== totalCount);
+
+  const paginationSummaryText =
+    totalFilteredCount === 0
+      ? isFilterActive
+        ? `Showing 0 filtered results (${totalCount} total)`
+        : 'Showing 0 entries'
+      : isFilterActive
+        ? `Showing ${startRowIndex}–${endRowIndex} of ${totalFilteredCount} filtered results (${totalCount} total)`
+        : `Showing ${startRowIndex}–${endRowIndex} of ${totalFilteredCount} entries`;
 
   return (
     <div
@@ -934,12 +939,12 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
                 <div className="relative">
                   <AnimatedInput
                     placeholder={filterPlaceholder}
-                    variant="clean"
+                    variant="search"
                     value={filterQuery}
                     onChange={handleFilterChange}
                     size="md"
                     icon={Search}
-                    labelClassName="ms-5"
+                    className="mb-0"
                   />
                 </div>
               </div>
@@ -985,10 +990,7 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
       {/* Summary and responsive table container */}
       <div className="flex flex-col">
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs text-muted-foreground bg-muted/5 border-b border-border">
-          <span>
-            Showing {startRowIndex}-{endRowIndex} of {totalFilteredCount}{' '}
-            matching rows (total dataset: {totalCount})
-          </span>
+          <span>{paginationSummaryText}</span>
           {enablePagination && (
             <span>
               Page {activePage} of {totalPages}
@@ -1039,6 +1041,7 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
                     rowIndex={rowIndex}
                     columns={effectiveColumns}
                     filterQuery={enableFiltering ? filterQuery : ''}
+                    onRowClick={onRowClick}
                   />
                 ))
               )}
@@ -1049,13 +1052,18 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
         {/* Pagination controls */}
         {enablePagination && totalPages > 1 && (
           <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-t border-border bg-muted/10">
-            <div className="flex items-center gap-1">
+            <div className="text-xs text-muted-foreground font-medium">
+              {paginationSummaryText}
+            </div>
+
+            <div className="flex items-center gap-1.5">
               <Button
                 variant="outline"
                 size="icon"
                 onClick={() => handlePageChange(1)}
                 disabled={activePage === 1}
                 aria-label="First page"
+                className="h-8 w-8"
               >
                 <ChevronsLeft className="h-4 w-4" />
               </Button>
@@ -1065,25 +1073,21 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
                 onClick={() => handlePageChange(activePage - 1)}
                 disabled={activePage === 1}
                 aria-label="Previous page"
+                className="h-8 w-8"
               >
                 <ChevronLeft className="h-4 w-4" />
               </Button>
 
-              <div className="flex flex-wrap items-center gap-1">
-                {pageNumbers.map((pageNumber) => (
-                  <Button
-                    key={pageNumber}
-                    variant={pageNumber === activePage ? 'default' : 'ghost'}
-                    size="sm"
-                    onClick={() => handlePageChange(pageNumber)}
-                    aria-current={
-                      pageNumber === activePage ? 'page' : undefined
-                    }
-                  >
-                    {pageNumber}
-                  </Button>
-                ))}
-              </div>
+              <span className="px-2.5 text-xs font-medium text-muted-foreground whitespace-nowrap">
+                Page{' '}
+                <span className="font-semibold text-foreground">
+                  {activePage}
+                </span>{' '}
+                of{' '}
+                <span className="font-semibold text-foreground">
+                  {totalPages}
+                </span>
+              </span>
 
               <Button
                 variant="outline"
@@ -1091,6 +1095,7 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
                 onClick={() => handlePageChange(activePage + 1)}
                 disabled={activePage === totalPages}
                 aria-label="Next page"
+                className="h-8 w-8"
               >
                 <ChevronRight className="h-4 w-4" />
               </Button>
@@ -1100,6 +1105,7 @@ export const AdvancedTable: React.FC<AdvancedTableProps> = ({
                 onClick={() => handlePageChange(totalPages)}
                 disabled={activePage === totalPages}
                 aria-label="Last page"
+                className="h-8 w-8"
               >
                 <ChevronsRight className="h-4 w-4" />
               </Button>

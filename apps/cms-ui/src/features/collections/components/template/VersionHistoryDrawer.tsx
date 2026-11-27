@@ -1,3 +1,4 @@
+import { activateOnKey } from '@/utils/a11y.util';
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -14,8 +15,8 @@ import {
 } from 'lucide-react';
 import { collectionsApi } from '../../api/collections.api';
 import {
-  VersionHistoryDrawerProps,
-  ContentVersionRecord,
+  type VersionHistoryDrawerProps,
+  type ContentVersionRecord,
 } from '../../types/template.types';
 import { useToast } from '@repo/shared-ui';
 import { browserLogger } from '@repo/logger/browser';
@@ -159,7 +160,13 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
                   return (
                     <div
                       key={version.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={isSelected}
                       onClick={() => setSelectedVersion(version)}
+                      onKeyDown={activateOnKey(() =>
+                        setSelectedVersion(version),
+                      )}
                       className={`relative p-4 rounded-xl border transition-all cursor-pointer ${
                         isSelected
                           ? 'border-indigo-500 bg-indigo-500/10'

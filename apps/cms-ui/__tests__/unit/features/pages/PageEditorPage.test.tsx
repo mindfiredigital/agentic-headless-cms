@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { PageEditorPage } from '../../../../src/features/collections/pages/editors/PageEditorPage';
 import { BrowserRouter } from 'react-router-dom';
@@ -18,12 +18,16 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   };
 });
 
-vi.mock('@repo/shared-ui', () => ({
-  useToast: () => ({
-    success: vi.fn(),
-    error: vi.fn(),
-  }),
-}));
+vi.mock('@repo/shared-ui', async () => {
+  const React = await import('react');
+  return {
+    useToast: () => ({
+      success: vi.fn(),
+      error: vi.fn(),
+    }),
+    DialogContext: React.createContext(undefined),
+  };
+});
 
 // Mock react-router-dom useParams
 vi.mock('react-router-dom', async (importOriginal) => {

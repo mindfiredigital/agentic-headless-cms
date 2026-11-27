@@ -1,8 +1,11 @@
 import { SQL, and, asc, desc, or, sql } from 'drizzle-orm';
-import type { SchemaField } from '@repo/types';
-import { contentEntries, entryLocalizations } from '@repo/shared-db';
+import type { SchemaField, ContentQueryOptions } from '@repo/types';
+import {
+  contentEntries,
+  entryLocalizations,
+  contentWorkflowStates,
+} from '@repo/shared-db';
 import { BadRequestError } from '@repo/utils';
-import { ContentQueryOptions } from '@repo/types';
 
 const FILTER_OPERATORS = [
   '$eq',
@@ -29,6 +32,7 @@ const SORTABLE_BASE_COLUMNS = {
   createdAt: contentEntries.createdAt,
   updatedAt: contentEntries.updatedAt,
   status: entryLocalizations.status,
+  workflowStage: sql`COALESCE(${contentWorkflowStates.currentStage}, 'draft')`,
 } as const;
 
 const FILTERABLE_BASE_COLUMNS = {
@@ -58,6 +62,10 @@ const FILTERABLE_BASE_COLUMNS = {
       '$gte',
     ]),
   },
+  workflowStage: {
+    column: contentWorkflowStates.currentStage,
+    allowedOps: new Set<FilterOperator>(['$eq', '$ne', '$in']),
+  },
 } as const;
 
 function findField(fields: SchemaField[], apiId: string): SchemaField {
@@ -84,6 +92,19 @@ function buildBaseColumnComparison(
 
   switch (operator) {
     case '$eq':
+      if (apiId === 'workflowStage') {
+        const alt = rawValue.includes('-')
+          ? rawValue.replace(/-/g, '_')
+          : rawValue.replace(/_/g, '-');
+        if (rawValue.toLowerCase() === 'draft') {
+          return or(
+            sql`${col} = ${rawValue}`,
+            sql`${col} = ${alt}`,
+            sql`${col} IS NULL`,
+          )!;
+        }
+        return or(sql`${col} = ${rawValue}`, sql`${col} = ${alt}`)!;
+      }
       return sql`${col} = ${rawValue}`;
     case '$ne':
       return sql`${col} != ${rawValue}`;
@@ -363,6 +384,36 @@ export function parseContentQuery(
   } else if (!hasFilterStatus && defaultStatus && defaultStatus !== 'all') {
     const statusSql = sql`${entryLocalizations.status} = ${defaultStatus}`;
     where = where ? and(where, statusSql) : statusSql;
+  }
+
+  const kindList = (v: unknown): string[] =>
+    typeof v === 'string'
+      ? v
+          .split(',')
+          .map((k) => k.trim())
+          .filter(Boolean)
+      : [];
+  const kinds = kindList(query.kind);
+  const excluded = kindList(query.excludeKind);
+  for (const k of [...kinds, ...excluded]) {
+    if (!/^[a-z][a-z0-9_-]{0,31}$/i.test(k)) {
+      throw new BadRequestError(`Invalid kind '${k}'.`);
+    }
+  }
+  const kindOf = sql`coalesce(${entryLocalizations.data}->>'kind', 'page')`;
+  if (kinds.length) {
+    const kindSql = sql`${kindOf} IN (${sql.join(
+      kinds.map((k) => sql`${k}`),
+      sql`, `,
+    )})`;
+    where = where ? and(where, kindSql) : kindSql;
+  }
+  if (excluded.length) {
+    const kindSql = sql`${kindOf} NOT IN (${sql.join(
+      excluded.map((k) => sql`${k}`),
+      sql`, `,
+    )})`;
+    where = where ? and(where, kindSql) : kindSql;
   }
 
   if (search && search.trim()) {

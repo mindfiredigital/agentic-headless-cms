@@ -6,6 +6,9 @@
     "build:analyze": "pnpm --filter cms-ui run build:analyze",
     "analyze": "pnpm --filter cms-ui run build:analyze",
     "dev": "turbo run dev",
+    "dev:backend": "pnpm --filter backend run dev",
+    "dev:frontend": "pnpm --filter frontend run dev",
+    "dev:worker": "pnpm --filter worker run dev",
     "docs:dev": "pnpm --filter docs run start",
     "docs:build": "pnpm --filter docs run build",
     "cli": "pnpm --filter backend run cli",
@@ -50,7 +53,18 @@
   "pnpm": {
     "overrides": {
       "react": "19.2.0",
-      "react-dom": "19.2.0"
+      "react-dom": "19.2.0",
+      "dompurify": ">=3.4.17",
+      "html2pdf.js": "^0.14.0",
+      "fast-uri": "^3.1.9",
+      "axios": "^1.20.0",
+      "follow-redirects": "^1.16.2",
+      "zod": "^4.6.6",
+      "hono": "^4.13.11",
+      "qs": "^6.16.1",
+      "ip-address": "^10.7.4",
+      "body-parser": "^2.4.0",
+      "@modelcontextprotocol/sdk": "^1.32.0"
     }
   }
 }

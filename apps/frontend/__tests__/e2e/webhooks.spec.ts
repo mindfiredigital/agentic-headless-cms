@@ -6,11 +6,14 @@ test('admin can register and delete a webhook', async ({ page }) => {
 
   await page.goto('/webhooks');
 
-  await page.getByRole('button', { name: 'Register Webhook' }).click();
+  await page.getByRole('button', { name: '+ Register' }).click();
   await page.getByPlaceholder('e.g. Next.js ISR Rebuild').fill(name);
   await page
     .getByPlaceholder('https://example.com/api/revalidate')
     .fill('https://example.com/webhook-target');
+  await page
+    .getByRole('button', { name: /select events to subscribe/i })
+    .click();
   await page.getByRole('checkbox', { name: 'content.published' }).check();
   await page.getByRole('button', { name: 'Register', exact: true }).click();
 
@@ -19,7 +22,8 @@ test('admin can register and delete a webhook', async ({ page }) => {
   await expect(row.getByText('content.published')).toBeVisible();
   await expect(row.getByText('Active', { exact: true })).toBeVisible();
 
-  await row.getByRole('button', { name: 'Delete Webhook' }).click();
+  await row.getByRole('button', { name: 'Open menu' }).click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
   await expect(
     page.getByRole('heading', { name: 'Delete webhook?' }),
   ).toBeVisible();

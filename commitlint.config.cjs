@@ -41,6 +41,7 @@ module.exports = {
         'cms',
         'content',
         'editor',
+        'workflow',
         'features',
         'guards',
         'hooks',
@@ -122,6 +123,7 @@ module.exports = {
       ],
     ],
     'subject-min-length': [2, 'always', 10],
+    'header-max-length': [2, 'always', 100],
   },
   ignores: [(commit) => /^feat:\s*Merge pull request/i.test(commit)],
 };

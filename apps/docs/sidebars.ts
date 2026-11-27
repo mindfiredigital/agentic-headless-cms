@@ -20,6 +20,7 @@ const sidebars: SidebarsConfig = {
         'features/schema-builder',
         'features/content-manager',
         'features/draft-and-publish',
+        'features/workflows',
         'features/media-library',
         'features/internationalization',
         'features/roles-and-permissions',
@@ -32,9 +33,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Developer SDKs',
       collapsed: true,
-      items: [
-        'content-apis/sdks',
-      ],
+      items: ['content-apis/sdks'],
     },
     {
       type: 'category',

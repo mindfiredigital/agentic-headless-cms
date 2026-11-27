@@ -35,17 +35,19 @@ export const primaryNavItems: NavItem[] = [
     label: 'Workflows',
     href: '/workflows',
     icon: Workflow,
-    disabled: true,
-    disabledBadge: 'Soon',
   },
   {
     label: 'Approvals',
     href: '/approvals',
     icon: SquareCheck,
+  },
+  {
+    label: 'Agents',
+    href: '/agents',
+    icon: Bot,
     disabled: true,
     disabledBadge: 'Soon',
   },
-  { label: 'Agents', href: '/agents', icon: Bot },
 ];
 
 /** Secondary navigation — governance/administration surfaces (SRS §4.8–4.9). */

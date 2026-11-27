@@ -12,6 +12,7 @@ import {
   createContentEntry,
   deleteContentEntry,
   getContentEntry,
+  listContentVersions,
   publishContentEntry,
   unpublishContentEntry,
   updateContentEntry,
@@ -26,14 +27,47 @@ import {
   Skeleton,
 } from '@repo/shared-ui';
 import type { SchemaField } from '@repo/types';
-import { ChevronDown, Globe, History, Trash2, Undo2 } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  Globe,
+  History,
+  Languages,
+  Loader2,
+  Lock,
+  MoreVertical,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  Undo2,
+  UserCheck,
+  Workflow as WorkflowIcon,
+  Zap,
+} from 'lucide-react';
+import {
+  translateContentEntry,
+  getTranslationConfig,
+  type TranslationConfig,
+} from '@/lib/services/translation-service';
+import { TranslationSettingsDialog } from './translation-settings-dialog';
 import { FormProvider } from 'react-hook-form';
 import { toast } from 'sonner';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DynamicField } from './dynamic-field';
 import { VersionHistoryDrawer } from './version-history-drawer';
+import { WorkflowTransitionModal } from './workflow-transition-modal';
+import { WorkflowHistoryDrawer } from './workflow-history-drawer';
+import {
+  getEntryWorkflowState,
+  transitionEntry,
+  updateEntryWorkflowMode,
+} from '@/lib/api/workflows';
+import type { WorkflowTransition, PendingReviewsResult } from '@repo/types';
 import type { ContentEntryFormProps } from '@/types/component.types';
 import { useHasPermission } from '@/hooks/use-permissions';
+import { useAuthStore } from '@/stores/auth-store';
+import { cn } from '@/lib/utils';
 
 import { buildDefaultValues } from '@/utils/form';
 
@@ -135,6 +169,10 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
   const [isUnpublishConfirmOpen, setIsUnpublishConfirmOpen] = useState(false);
   const [isLocaleConfirmOpen, setIsLocaleConfirmOpen] = useState(false);
   const [pendingLocale, setPendingLocale] = useState<string | null>(null);
+  const [isWorkflowHistoryOpen, setIsWorkflowHistoryOpen] = useState(false);
+  const [pendingTransition, setPendingTransition] =
+    useState<WorkflowTransition | null>(null);
+  const [isTransitionModalOpen, setIsTransitionModalOpen] = useState(false);
 
   const canCreate = useHasPermission('create', schema.id);
   const canUpdate = useHasPermission('update', schema.id);
@@ -152,11 +190,48 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
     queryKey: ['locales'],
     queryFn: () => listLocales(),
   });
-  const locales = useMemo(() => localesData?.data ?? [], [localesData]);
+  const rawLocales = useMemo(() => localesData?.data ?? [], [localesData]);
   const defaultLocale = useMemo(() => {
-    const defaultObj = locales.find((l) => l.isDefault);
+    const defaultObj = rawLocales.find((l) => l.isDefault);
     return defaultObj ? defaultObj.code : DEFAULT_LOCALE;
-  }, [locales]);
+  }, [rawLocales]);
+
+  const locales = useMemo(() => {
+    const list = [...rawLocales];
+
+    // Ensure the defaultLocale is always present in the options list
+    const hasDefault = list.some(
+      (l) => l.code.toLowerCase() === defaultLocale.toLowerCase(),
+    );
+    if (!hasDefault) {
+      list.unshift({
+        id: 'system-default-locale',
+        code: defaultLocale,
+        name:
+          defaultLocale === DEFAULT_LOCALE
+            ? 'English'
+            : defaultLocale.toUpperCase(),
+        isDefault: true,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    // Ensure DEFAULT_LOCALE ('en') is also present if defaultLocale is different
+    const hasEn = list.some(
+      (l) => l.code.toLowerCase() === DEFAULT_LOCALE.toLowerCase(),
+    );
+    if (!hasEn && defaultLocale !== DEFAULT_LOCALE) {
+      list.push({
+        id: 'system-en-locale',
+        code: DEFAULT_LOCALE,
+        name: 'English',
+        isDefault: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    return list;
+  }, [rawLocales, defaultLocale]);
 
   const [selectedLocale, setSelectedLocale] = useState<string>(DEFAULT_LOCALE);
 
@@ -201,6 +276,108 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
     return undefined;
   }, [entry, localizedEntry, selectedLocale, defaultLocale]);
 
+  // Query historical versions for this entry
+  const { data: versions } = useQuery({
+    queryKey: ['content', schema.slug, 'entry', entry?.id, 'versions'],
+    queryFn: () => listContentVersions(schema.slug, entry!.id),
+    enabled: Boolean(entry?.id),
+  });
+
+  const sortedVersions = useMemo(() => {
+    if (!versions) return [];
+    return [...versions].sort((a, b) => b.versionNo - a.versionNo);
+  }, [versions]);
+
+  const latestVersionNo = useMemo(() => {
+    return sortedVersions[0]?.versionNo ?? 1;
+  }, [sortedVersions]);
+
+  const [selectedVersionNo, setSelectedVersionNo] = useState<number | null>(
+    null,
+  );
+  const [pendingVersionNo, setPendingVersionNo] = useState<number | null>(null);
+  const [isVersionConfirmOpen, setIsVersionConfirmOpen] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [isTranslationSettingsOpen, setIsTranslationSettingsOpen] =
+    useState(false);
+  const [translationConfig, setTranslationConfig] = useState<TranslationConfig>(
+    () => getTranslationConfig(),
+  );
+
+  async function handleAutoTranslate() {
+    if (selectedLocale === defaultLocale) {
+      toast.info(`You are currently on the default locale (${defaultLocale}).`);
+      return;
+    }
+
+    const sourceData = (entry?.data || form.getValues()) as Record<
+      string,
+      unknown
+    >;
+    if (!sourceData || Object.keys(sourceData).length === 0) {
+      toast.error(
+        `No source content found in default locale (${defaultLocale}) to translate from.`,
+      );
+      return;
+    }
+
+    setIsTranslating(true);
+    try {
+      const result = await translateContentEntry({
+        fields: definition.fields,
+        sourceData,
+        sourceLocale: defaultLocale,
+        targetLocale: selectedLocale,
+        config: translationConfig,
+      });
+
+      if (result.translatedCount === 0) {
+        toast.info(
+          'No translatable text fields with content were found to translate.',
+        );
+        return;
+      }
+
+      Object.entries(result.translatedData).forEach(([key, value]) => {
+        form.setValue(key, value, {
+          shouldDirty: true,
+          shouldValidate: true,
+          shouldTouch: true,
+        });
+      });
+
+      toast.success(
+        `Auto-translated ${result.translatedCount} field${
+          result.translatedCount === 1 ? '' : 's'
+        } from ${defaultLocale.toUpperCase()} to ${selectedLocale.toUpperCase()}.`,
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to auto-translate content',
+      );
+    } finally {
+      setIsTranslating(false);
+    }
+  }
+
+  const selectedVersionRecord = useMemo(() => {
+    if (selectedVersionNo === null || !sortedVersions.length) return null;
+    return (
+      sortedVersions.find((v) => v.versionNo === selectedVersionNo) ?? null
+    );
+  }, [selectedVersionNo, sortedVersions]);
+
+  const isViewingHistorical = Boolean(
+    selectedVersionRecord && selectedVersionNo !== latestVersionNo,
+  );
+
+  const activeDisplayData = useMemo(() => {
+    if (isViewingHistorical && selectedVersionRecord) {
+      return selectedVersionRecord.data;
+    }
+    return activeEntryData;
+  }, [isViewingHistorical, selectedVersionRecord, activeEntryData]);
+
   const currentStatus = useMemo(() => {
     if (!entry) return undefined;
     if (selectedLocale === defaultLocale) return entry.status;
@@ -212,20 +389,20 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
   const form = useForm<Record<string, unknown>>({
     resolver: zodResolver(zodSchema),
     defaultValues: buildDefaultValues(definition, entry?.data),
-    values: buildDefaultValues(definition, activeEntryData),
+    values: buildDefaultValues(definition, activeDisplayData),
     resetOptions: {
       keepDirtyValues: false,
     },
   });
 
   useEffect(() => {
-    if (activeEntryData !== undefined) {
-      form.reset(buildDefaultValues(definition, activeEntryData));
+    if (activeDisplayData !== undefined) {
+      form.reset(buildDefaultValues(definition, activeDisplayData));
     } else if (localizedEntry === null || (!entry && selectedLocale)) {
       form.reset(buildDefaultValues(definition, undefined));
     }
   }, [
-    activeEntryData,
+    activeDisplayData,
     localizedEntry,
     entry,
     selectedLocale,
@@ -241,6 +418,17 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
       return;
     }
     setSelectedLocale(newLocale);
+    setSelectedVersionNo(null);
+  }
+
+  function handleVersionSelect(versionNo: number) {
+    if (versionNo === (selectedVersionNo ?? latestVersionNo)) return;
+    if (form.formState.isDirty) {
+      setPendingVersionNo(versionNo);
+      setIsVersionConfirmOpen(true);
+      return;
+    }
+    setSelectedVersionNo(versionNo === latestVersionNo ? null : versionNo);
   }
 
   function invalidateList() {
@@ -259,6 +447,14 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
       await queryClient.invalidateQueries({
         queryKey: ['content', schema.slug, 'entry', saved.id],
       });
+      await queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-state'],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-history'],
+      });
+      await refetchWorkflowState();
+      form.reset(form.getValues());
       toast.success(
         `Draft saved successfully${selectedLocale ? ` (${selectedLocale})` : ''}`,
       );
@@ -307,6 +503,13 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
       await queryClient.invalidateQueries({
         queryKey: ['content', schema.slug, 'entry', entry?.id],
       });
+      await queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-state'],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-history'],
+      });
+      await refetchWorkflowState();
       toast.success(
         `Entry unpublished successfully${selectedLocale ? ` (${selectedLocale})` : ''}`,
       );
@@ -342,6 +545,138 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
     },
   });
 
+  const { data: workflowState, refetch: refetchWorkflowState } = useQuery({
+    queryKey: ['entry-workflow-state', schema.slug, entry?.id],
+    queryFn: () => getEntryWorkflowState(schema.slug, entry!.id),
+    enabled: !!entry?.id,
+  });
+
+  const currentUser = useAuthStore((state) => state.user);
+  const isAuthor = useMemo(() => {
+    if (!entry) return true;
+    if (!workflowState?.createdBy?.id || !currentUser?.id) return false;
+    return workflowState.createdBy.id === currentUser.id;
+  }, [entry, workflowState?.createdBy?.id, currentUser?.id]);
+  const isSubmitter = useMemo(() => {
+    if (!entry) return false;
+    if (!workflowState?.submittedBy?.id || !currentUser?.id) return false;
+    return workflowState.submittedBy.id === currentUser.id;
+  }, [entry, workflowState?.submittedBy?.id, currentUser?.id]);
+  const isAuthorOrSubmitter = isAuthor || isSubmitter;
+  const isLockedForNonAuthor = Boolean(
+    workflowState?.requiresEditsBeforeResubmit && !isAuthorOrSubmitter,
+  );
+
+  const transitionMutation = useMutation({
+    mutationFn: (variables: { toStage: string; comment?: string }) => {
+      if (!entry) throw new Error('Entry not found.');
+      return transitionEntry(schema.slug, entry.id, {
+        ...variables,
+        expectedStage: workflowState?.currentStage?.slug,
+      });
+    },
+    onSuccess: (newState, variables) => {
+      const isRequestChanges =
+        (variables.toStage === 'draft' ||
+          variables.toStage.toLowerCase().includes('draft')) &&
+        workflowState?.currentStage?.slug !== 'draft';
+
+      toast.success(
+        isRequestChanges
+          ? 'Changes requested successfully.'
+          : `Stage changed to ${newState.currentStage?.name || newState.currentStage?.slug}`,
+      );
+      refetchWorkflowState();
+      queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-state', schema.slug, entry?.id],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-history', schema.slug, entry?.id],
+      });
+      queryClient.setQueryData<PendingReviewsResult>(
+        ['workflows', 'pending-reviews'],
+        (old) => {
+          if (!old || !entry?.id) return old;
+          const isStillInReview = (newState.currentStage?.slug || '')
+            .toLowerCase()
+            .includes('review');
+          if (isStillInReview) return old;
+          return {
+            ...old,
+            total: Math.max(0, old.total - 1),
+            items: old.items.filter((item) => item.entryId !== entry.id),
+          };
+        },
+      );
+      queryClient.invalidateQueries({
+        queryKey: ['workflows', 'pending-reviews'],
+      });
+      setIsTransitionModalOpen(false);
+      setPendingTransition(null);
+
+      if (isRequestChanges) {
+        queryClient.invalidateQueries({
+          queryKey: ['content', schema.slug],
+        });
+        router.push(`/content/${schema.slug}`);
+      }
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.statusCode === 409) {
+        toast.error(error.message);
+        refetchWorkflowState();
+        queryClient.invalidateQueries({
+          queryKey: ['content', schema.slug, 'entry', entry?.id],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ['entry-workflow-history', schema.slug, entry?.id],
+        });
+        setIsTransitionModalOpen(false);
+        setPendingTransition(null);
+        return;
+      }
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : 'Failed to transition stage. Please try again.',
+      );
+    },
+  });
+
+  const workflowModeMutation = useMutation({
+    mutationFn: (requiresReview: boolean) => {
+      if (!entry) throw new Error('Entry not found.');
+      return updateEntryWorkflowMode(schema.slug, entry.id, requiresReview);
+    },
+    onSuccess: (updatedState) => {
+      queryClient.setQueryData(
+        ['entry-workflow-state', schema.slug, entry?.id],
+        updatedState,
+      );
+      toast.dismiss();
+      toast.success(
+        updatedState.requiresReview === false
+          ? 'Direct publish enabled.'
+          : 'Review pipeline enabled.',
+        { duration: 2000 },
+      );
+      refetchWorkflowState();
+      queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-state', schema.slug, entry?.id],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ['entry-workflow-history', schema.slug, entry?.id],
+      });
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof ApiError || err instanceof Error
+          ? err.message
+          : 'Failed to update workflow review mode.',
+      );
+    },
+  });
+
   async function onSubmit(values: Record<string, unknown>) {
     setSubmitError(null);
     try {
@@ -365,7 +700,9 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
   }
 
   const { isDirty, isSubmitting } = form.formState;
-  const showSaveDraft = !entry || currentStatus !== 'published' || isDirty;
+  const showSaveDraft =
+    !isViewingHistorical &&
+    (!entry || currentStatus !== 'published' || isDirty);
 
   return (
     <FormProvider {...form}>
@@ -375,12 +712,40 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
       >
         {/* Sleek Top Action Bar */}
         <div className="flex flex-wrap items-center justify-between gap-4 p-3.5 sm:p-4 rounded-xl border bg-muted/30 backdrop-blur-sm">
-          {/* Status Badge & Locale Selector */}
+          {/* Status Badge & Document Metadata */}
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Status
-              </span>
+            {/* Unified Status / Workflow Stage Badge */}
+            {workflowState?.hasWorkflow && workflowState.currentStage ? (
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="px-2.5 py-1 rounded-full text-xs font-medium border flex items-center gap-1.5 shadow-2xs"
+                  style={{
+                    borderColor: `${workflowState.currentStage.color || '#3b82f6'}66`,
+                    backgroundColor: `${workflowState.currentStage.color || '#3b82f6'}18`,
+                    color: workflowState.currentStage.color || '#3b82f6',
+                  }}
+                >
+                  <span
+                    className="size-1.5 rounded-full"
+                    style={{
+                      backgroundColor:
+                        workflowState.currentStage.color || '#3b82f6',
+                    }}
+                  />
+                  {workflowState.currentStage.name}
+                </span>
+
+                {currentStatus === 'published' && (
+                  <Badge
+                    variant="success"
+                    size="sm"
+                    className="capitalize font-medium text-xs px-2 py-0.5"
+                  >
+                    Published
+                  </Badge>
+                )}
+              </div>
+            ) : (
               <Badge
                 variant={
                   currentStatus === 'published'
@@ -390,13 +755,13 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                       : 'outline'
                 }
                 size="sm"
-                className="capitalize font-medium flex items-center gap-1.5"
+                className="capitalize font-medium flex items-center gap-1.5 text-xs px-2.5 py-1"
               >
                 {currentStatus === 'untranslated'
                   ? 'Not translated'
                   : (currentStatus ?? 'Not saved')}
               </Badge>
-            </div>
+            )}
 
             {/* Locale Selector Dropdown */}
             <Dropdown
@@ -415,8 +780,10 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                   </span>
                   {locales.length > 0 && (
                     <span className="text-muted-foreground text-[11px] font-normal hidden sm:inline">
-                      {locales.find((l) => l.code === selectedLocale)?.name ??
-                        ''}
+                      {locales.find(
+                        (l) =>
+                          l.code.toLowerCase() === selectedLocale.toLowerCase(),
+                      )?.name ?? ''}
                     </span>
                   )}
                   <ChevronDown className="size-3 text-muted-foreground ml-0.5 opacity-60" />
@@ -447,7 +814,10 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                         </span>
                         <span
                           className={
-                            loc.code === selectedLocale ? 'font-semibold' : ''
+                            loc.code.toLowerCase() ===
+                            selectedLocale.toLowerCase()
+                              ? 'font-semibold'
+                              : ''
                           }
                         >
                           {loc.name}
@@ -456,8 +826,8 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                       {loc.isDefault && (
                         <Badge
                           variant="outline"
-                          size="xs"
-                          className="text-[10px]"
+                          size="sm"
+                          className="text-xs font-medium px-2 py-0.5"
                         >
                           Default
                         </Badge>
@@ -467,29 +837,272 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                 ))
               )}
             </Dropdown>
+
+            {/* Auto-Translate Action (visible when in secondary locale) */}
+            {selectedLocale !== defaultLocale && canEdit && (
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAutoTranslate}
+                  disabled={isTranslating}
+                  className="h-8 gap-1.5 px-2.5 text-xs font-medium border-primary/40 bg-primary/5 text-primary hover:bg-primary/15 hover:text-primary transition-all"
+                  aria-label="Auto-translate"
+                  title={`Auto-translate from ${defaultLocale} to ${selectedLocale}`}
+                >
+                  {isTranslating ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Languages className="size-3.5" />
+                  )}
+                  <span>Auto-translate</span>
+                </Button>
+
+                <Dropdown
+                  align="end"
+                  className="min-w-[12rem] p-1.5"
+                  trigger={
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+                      aria-label="Translation Settings"
+                      title="Translation options & provider settings"
+                    >
+                      <Settings2 className="size-3.5" />
+                    </Button>
+                  }
+                >
+                  <DropdownItem onSelect={handleAutoTranslate}>
+                    <div className="flex items-center gap-2 text-xs">
+                      <Sparkles className="size-3.5 text-primary" />
+                      <span>Translate from {defaultLocale.toUpperCase()}</span>
+                    </div>
+                  </DropdownItem>
+                  <DropdownItem
+                    onSelect={() => setIsTranslationSettingsOpen(true)}
+                  >
+                    <div className="flex items-center gap-2 text-xs">
+                      <Settings2 className="size-3.5 text-muted-foreground" />
+                      <span>
+                        Engine:{' '}
+                        <span className="font-semibold capitalize">
+                          {translationConfig.provider === 'free'
+                            ? 'Standard'
+                            : translationConfig.provider}
+                        </span>
+                      </span>
+                    </div>
+                  </DropdownItem>
+                </Dropdown>
+              </div>
+            )}
+
+            {/* Version Toggle Dropdown */}
+            {entry && (
+              <Dropdown
+                align="start"
+                className="max-h-60 overflow-y-auto min-w-[7rem] p-1.5"
+                trigger={
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 px-2.5 text-xs font-medium border-border/80"
+                    aria-label="Select Version"
+                  >
+                    <span className="font-semibold">
+                      v{selectedVersionNo ?? latestVersionNo}
+                    </span>
+                    <ChevronDown className="size-3 text-muted-foreground ml-0.5 opacity-60" />
+                  </Button>
+                }
+              >
+                <div className="max-h-52 overflow-y-auto flex flex-col gap-0.5 pr-1">
+                  {sortedVersions.length === 0 ? (
+                    <DropdownItem disabled>
+                      <span className="text-xs">v1</span>
+                    </DropdownItem>
+                  ) : (
+                    sortedVersions.map((v) => {
+                      const isSelected =
+                        (selectedVersionNo ?? latestVersionNo) === v.versionNo;
+                      return (
+                        <DropdownItem
+                          key={v.id}
+                          onSelect={() => handleVersionSelect(v.versionNo)}
+                          className={isSelected ? 'font-bold bg-accent' : ''}
+                        >
+                          <span className="text-xs">v{v.versionNo}</span>
+                        </DropdownItem>
+                      );
+                    })
+                  )}
+                </div>
+              </Dropdown>
+            )}
+
+            {/* Author / Submitter Metadata Display */}
+            {entry &&
+              (workflowState?.createdBy || workflowState?.submittedBy) && (
+                <div className="hidden md:flex items-center gap-1.5 text-[11px] text-muted-foreground bg-muted/40 border border-border/60 rounded-md px-2 py-1">
+                  {workflowState?.createdBy && (
+                    <span
+                      className="flex items-center gap-1"
+                      title={workflowState.createdBy.email || undefined}
+                    >
+                      <span className="opacity-70">Author:</span>
+                      <span className="font-semibold text-foreground truncate max-w-[120px]">
+                        {workflowState.createdBy.name ||
+                          workflowState.createdBy.email}
+                      </span>
+                    </span>
+                  )}
+                  {workflowState?.submittedBy &&
+                    workflowState.submittedBy.id !==
+                      workflowState.createdBy?.id && (
+                      <>
+                        <span className="text-border">|</span>
+                        <span
+                          className="flex items-center gap-1"
+                          title={workflowState.submittedBy.email || undefined}
+                        >
+                          <span className="opacity-70">Submitted by:</span>
+                          <span className="font-semibold text-foreground truncate max-w-[120px]">
+                            {workflowState.submittedBy.name ||
+                              workflowState.submittedBy.email}
+                          </span>
+                        </span>
+                      </>
+                    )}
+                </div>
+              )}
+
+            {/* Workflow Mode Selector (Require Review vs Direct Publish) */}
+            {entry &&
+              !isViewingHistorical &&
+              workflowState?.hasWorkflow &&
+              (canPublish || canEdit) &&
+              !workflowState.requiresEditsBeforeResubmit &&
+              (Boolean(workflowState.currentStage?.isInitial) ||
+                workflowState.currentStage?.slug === 'draft') && (
+                <Dropdown
+                  align="start"
+                  className="min-w-[14rem] p-1.5"
+                  trigger={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className={cn(
+                        'h-8 gap-1.5 px-2.5 text-xs font-medium border-border/80 transition-colors',
+                        workflowState.requiresReview === false
+                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/20'
+                          : 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20',
+                      )}
+                      aria-label="Workflow Review Mode"
+                      title={
+                        workflowState.requiresReview === false
+                          ? 'Direct Publish: Users with publish permission can publish directly without review.'
+                          : 'Require Review: Entry must be reviewed and approved before publishing.'
+                      }
+                      disabled={workflowModeMutation.isPending || !canEdit}
+                    >
+                      {workflowState.requiresReview === false ? (
+                        <Zap className="size-3 text-emerald-600 dark:text-emerald-400" />
+                      ) : (
+                        <ShieldCheck className="size-3 text-amber-600 dark:text-amber-400" />
+                      )}
+                      <span>
+                        {workflowState.requiresReview === false
+                          ? 'Direct Publish'
+                          : 'Require Review'}
+                      </span>
+                      <ChevronDown className="size-3 opacity-60 ml-0.5" />
+                    </Button>
+                  }
+                >
+                  <div className="flex flex-col gap-1 p-1">
+                    <div className="px-2 py-1 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      Publishing Mode
+                    </div>
+                    <DropdownItem
+                      onSelect={() => {
+                        if (workflowState.requiresReview === false) {
+                          workflowModeMutation.mutate(true);
+                        }
+                      }}
+                      className={cn(
+                        'flex flex-col items-start gap-0.5 p-2 rounded-md cursor-pointer',
+                        workflowState.requiresReview !== false &&
+                          'bg-accent/60 font-medium',
+                      )}
+                    >
+                      <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                        <ShieldCheck className="size-3.5 text-amber-500" />
+                        <span>Require Review</span>
+                        {workflowState.requiresReview !== false && (
+                          <Check className="size-3 text-primary ml-auto" />
+                        )}
+                      </div>
+                      <span className="text-[11px] text-muted-foreground pl-5.5">
+                        Routes entry through editorial review and approval
+                        before publishing.
+                      </span>
+                    </DropdownItem>
+
+                    <DropdownItem
+                      onSelect={() => {
+                        if (!canPublish) {
+                          toast.error(
+                            'Only users with publish permission can enable Direct Publish mode.',
+                          );
+                          return;
+                        }
+                        if (workflowState.requiresReview !== false) {
+                          workflowModeMutation.mutate(false);
+                        }
+                      }}
+                      disabled={!canPublish}
+                      className={cn(
+                        'flex flex-col items-start gap-0.5 p-2 rounded-md',
+                        !canPublish
+                          ? 'opacity-60 cursor-not-allowed'
+                          : 'cursor-pointer',
+                        workflowState.requiresReview === false &&
+                          'bg-accent/60 font-medium',
+                      )}
+                    >
+                      <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                        <Zap className="size-3.5 text-emerald-500" />
+                        <span>Direct Publish</span>
+                        {workflowState.requiresReview === false && (
+                          <Check className="size-3 text-primary ml-auto" />
+                        )}
+                      </div>
+                      <span className="text-[11px] text-muted-foreground pl-5.5">
+                        {canPublish
+                          ? 'Bypasses review pipeline. Authorized publishers can publish directly.'
+                          : 'Requires publish permission. Direct publish is restricted to authorized publishers.'}
+                      </span>
+                    </DropdownItem>
+                  </div>
+                </Dropdown>
+              )}
           </div>
 
           {/* Action Buttons Group */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            {entry ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="flex items-center gap-1.5 text-xs font-medium"
-                onClick={() => setIsVersionHistoryOpen(true)}
-              >
-                <History className="size-3.5 text-muted-foreground" />
-                <span>View history</span>
-              </Button>
-            ) : null}
-
-            {!canEdit ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {!canEdit || isLockedForNonAuthor ? (
               <Badge
                 variant="outline"
                 className="text-amber-600 bg-amber-500/10 border-amber-500/20 text-xs px-2.5 py-1"
               >
-                Read-Only
+                {isLockedForNonAuthor
+                  ? 'Awaiting Author Revisions'
+                  : 'Read-Only'}
               </Badge>
             ) : showSaveDraft ? (
               <Button
@@ -497,56 +1110,115 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                 variant="outline"
                 size="sm"
                 className="text-xs font-medium"
-                disabled={isSubmitting || isLocalizedLoading}
+                disabled={
+                  isSubmitting ||
+                  isLocalizedLoading ||
+                  (!!entry && !form.formState.isDirty)
+                }
               >
                 {isSubmitting ? 'Saving…' : 'Save Draft'}
               </Button>
             ) : null}
 
-            {currentStatus === 'published' ? (
-              <>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="text-xs font-medium opacity-70 cursor-not-allowed"
-                  disabled
-                >
-                  Published
-                </Button>
-
+            {/* Peer Review Indicator */}
+            {entry &&
+              !isViewingHistorical &&
+              workflowState?.hasWorkflow &&
+              workflowState.requiresReview !== false &&
+              workflowState.isSelfReviewer &&
+              (workflowState.currentStage?.slug.includes('review') ||
+                workflowState.currentStage?.name
+                  ?.toLowerCase()
+                  .includes('review')) && (
                 <span
                   title={
-                    !canPublish
-                      ? 'You do not have permission to unpublish.'
-                      : ''
+                    workflowState.selfReviewReason ||
+                    'This entry was authored or submitted by you. Another editor must review and approve it.'
                   }
                 >
-                  <Button
-                    type="button"
+                  <Badge
                     variant="outline"
-                    size="sm"
-                    className="text-xs font-medium flex items-center gap-1.5 text-amber-600 hover:text-amber-700 dark:text-amber-400"
-                    disabled={
-                      !canPublish ||
-                      unpublishMutation.isPending ||
-                      isLocalizedLoading
-                    }
-                    onClick={() => setIsUnpublishConfirmOpen(true)}
+                    className="text-amber-600 bg-amber-500/10 border-amber-500/20 text-xs px-2.5 py-1 flex items-center gap-1.5 cursor-help"
                   >
-                    <Undo2 className="size-3.5" />
-                    <span>
-                      {unpublishMutation.isPending
-                        ? 'Unpublishing…'
-                        : 'Unpublish'}
-                    </span>
-                  </Button>
+                    <UserCheck className="size-3" />
+                    <span>Awaiting Peer Review</span>
+                  </Badge>
                 </span>
-              </>
+              )}
+
+            {/* Workflow Stage Transitions */}
+            {entry &&
+              !isViewingHistorical &&
+              workflowState?.hasWorkflow &&
+              workflowState.requiresReview !== false &&
+              canEdit &&
+              !isLockedForNonAuthor &&
+              workflowState.availableTransitions?.map((trans) => {
+                const isReviewTransition =
+                  trans.name.toLowerCase().includes('submit') ||
+                  trans.toStage.toLowerCase().includes('review');
+                const isBlockedByRequestedChanges =
+                  isReviewTransition &&
+                  Boolean(workflowState.requiresEditsBeforeResubmit) &&
+                  !workflowState.rejectionComment
+                    ?.toLowerCase()
+                    .includes('mode');
+                const isBlockedByDirtyForm =
+                  isReviewTransition && form.formState.isDirty;
+                const isBlocked =
+                  isBlockedByRequestedChanges || isBlockedByDirtyForm;
+
+                const buttonTooltip = isBlockedByRequestedChanges
+                  ? 'Changes were requested. Please edit and save the draft before re-submitting for review.'
+                  : isBlockedByDirtyForm
+                    ? 'Please save your draft changes before submitting for review.'
+                    : undefined;
+
+                return (
+                  <span key={trans.id} title={buttonTooltip}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setPendingTransition(trans);
+                        setIsTransitionModalOpen(true);
+                      }}
+                      disabled={
+                        transitionMutation.isPending ||
+                        isLocalizedLoading ||
+                        isBlocked
+                      }
+                      className="text-xs font-medium border-border/80 text-foreground hover:bg-muted/40 shadow-2xs"
+                    >
+                      <span>{trans.name}</span>
+                    </Button>
+                  </span>
+                );
+              })}
+
+            {currentStatus === 'published' ? (
+              <Button
+                type="button"
+                size="sm"
+                className="text-xs font-medium opacity-70 cursor-not-allowed"
+                disabled
+              >
+                Published
+              </Button>
             ) : entry ? (
               <span
                 title={
-                  !canPublish ? 'You do not have permission to publish.' : ''
+                  workflowState?.hasWorkflow &&
+                  workflowState.requiresReview !== false &&
+                  !workflowState.isFinal
+                    ? `Workflow requires entry to reach the final publish stage (currently: "${workflowState?.currentStage?.name || workflowState?.currentStage?.slug}").`
+                    : !canPublish
+                      ? 'You do not have permission to publish.'
+                      : workflowState?.hasWorkflow &&
+                          workflowState.requiresReview === false
+                        ? 'Direct publish is enabled. Click to publish entry directly.'
+                        : ''
                 }
               >
                 <Button
@@ -554,7 +1226,11 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                   size="sm"
                   className="text-xs font-medium"
                   disabled={
+                    isViewingHistorical ||
                     !canPublish ||
+                    (workflowState?.hasWorkflow &&
+                      workflowState.requiresReview !== false &&
+                      !workflowState.isFinal) ||
                     publishMutation.isPending ||
                     isLocalizedLoading
                   }
@@ -565,29 +1241,64 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
               </span>
             ) : null}
 
-            {entry ? (
-              <span
-                title={
-                  !canDelete ? 'You do not have permission to delete.' : ''
+            {/* Consolidated More Actions Dropdown (View history, Workflow Log, Unpublish, Delete) */}
+            {entry && (
+              <Dropdown
+                align="end"
+                className="min-w-[13rem] p-1.5"
+                trigger={
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="size-8 p-0 border-border/80 text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+                    aria-label="More actions"
+                    title="More options & history"
+                  >
+                    <MoreVertical className="size-4" />
+                  </Button>
                 }
               >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="text-xs font-medium flex items-center gap-1.5 text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/30"
-                  disabled={
-                    !canDelete || deleteMutation.isPending || isLocalizedLoading
-                  }
-                  onClick={() => setIsDeleteConfirmOpen(true)}
-                >
-                  <Trash2 className="size-3.5" />
-                  <span>
-                    {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
-                  </span>
-                </Button>
-              </span>
-            ) : null}
+                <DropdownItem onSelect={() => setIsVersionHistoryOpen(true)}>
+                  <div className="flex items-center gap-2 text-xs">
+                    <History className="size-3.5 text-muted-foreground" />
+                    <span>View history</span>
+                  </div>
+                </DropdownItem>
+
+                {workflowState?.hasWorkflow && (
+                  <DropdownItem onSelect={() => setIsWorkflowHistoryOpen(true)}>
+                    <div className="flex items-center gap-2 text-xs">
+                      <WorkflowIcon className="size-3.5 text-primary" />
+                      <span>Workflow Log</span>
+                    </div>
+                  </DropdownItem>
+                )}
+
+                {currentStatus === 'published' && canPublish && (
+                  <DropdownItem
+                    onSelect={() => setIsUnpublishConfirmOpen(true)}
+                  >
+                    <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+                      <Undo2 className="size-3.5" />
+                      <span>Unpublish</span>
+                    </div>
+                  </DropdownItem>
+                )}
+
+                {canDelete && (
+                  <DropdownItem
+                    onSelect={() => setIsDeleteConfirmOpen(true)}
+                    className="text-destructive focus:text-destructive focus:bg-destructive/10 cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2 text-xs text-destructive">
+                      <Trash2 className="size-3.5" />
+                      <span>Delete</span>
+                    </div>
+                  </DropdownItem>
+                )}
+              </Dropdown>
+            )}
           </div>
         </div>
 
@@ -600,8 +1311,80 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
           </p>
         ) : null}
 
+        {/* Changes Requested Banner */}
+        {entry &&
+          workflowState?.requiresEditsBeforeResubmit &&
+          !workflowState.rejectionComment?.toLowerCase().includes('mode') && (
+            <div className="flex items-start justify-between gap-3 p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs">
+              <div className="flex items-start gap-2.5">
+                <span className="font-semibold shrink-0">
+                  {isAuthorOrSubmitter
+                    ? 'Changes requested:'
+                    : 'Awaiting Revisions:'}
+                </span>
+                <span>
+                  {isAuthorOrSubmitter ? (
+                    <>
+                      Edit the fields and click <strong>Save Draft</strong> to
+                      re-enable review submission.
+                    </>
+                  ) : (
+                    <>
+                      This entry has requested changes and is locked until the
+                      author submits revisions.
+                    </>
+                  )}
+                </span>
+              </div>
+              {!isAuthorOrSubmitter && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs border-amber-500/40 text-amber-900 dark:text-amber-200 hover:bg-amber-500/20 shrink-0"
+                  onClick={() => router.push(`/content/${schema.slug}`)}
+                >
+                  Back to Entries
+                </Button>
+              )}
+            </div>
+          )}
+
+        {/* Historical Preview Notice */}
+        {isViewingHistorical && (
+          <div className="flex items-center justify-between p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 text-xs">
+            <span>
+              Viewing historical snapshot <strong>v{selectedVersionNo}</strong>{' '}
+              (Read-Only).
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              className="h-7 text-xs bg-background"
+              onClick={() => setSelectedVersionNo(null)}
+            >
+              Back to Latest (v{latestVersionNo})
+            </Button>
+          </div>
+        )}
+
+        {/* Read-Only Notice Banner */}
+        {entry && !canEdit && !isViewingHistorical && !isLockedForNonAuthor && (
+          <div className="flex items-center gap-2 p-3 rounded-lg border border-border/70 bg-muted/30 text-muted-foreground text-xs">
+            <Lock className="size-3.5 text-muted-foreground shrink-0" />
+            <span>
+              You are viewing this entry in read-only mode. Content cannot be
+              edited or submitted.
+            </span>
+          </div>
+        )}
+
         {/* Dynamic Fields taking full width */}
-        <div className="grid gap-5 w-full">
+        <fieldset
+          disabled={isViewingHistorical || isLockedForNonAuthor || !canEdit}
+          className="grid gap-5 w-full border-none p-0 m-0 disabled:opacity-100 [&_input:disabled]:opacity-100 [&_input:disabled]:text-foreground [&_textarea:disabled]:opacity-100 [&_textarea:disabled]:text-foreground [&_input:disabled]:bg-muted/30 [&_textarea:disabled]:bg-muted/30 [&_input:disabled]:cursor-default [&_textarea:disabled]:cursor-default [&_input:disabled]:border-border/70 [&_textarea:disabled]:border-border/70"
+        >
           {isLocalizedLoading ? (
             <div
               data-testid="locale-loading-skeleton"
@@ -617,11 +1400,36 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
                 key={field.apiId}
                 field={field}
                 control={form.control}
+                disabled={
+                  isViewingHistorical || isLockedForNonAuthor || !canEdit
+                }
               />
             ))
           )}
-        </div>
+        </fieldset>
       </form>
+
+      {/* Version Switch Confirmation Dialog */}
+      <ConfirmDialog
+        open={isVersionConfirmOpen}
+        onOpenChange={(open) => {
+          setIsVersionConfirmOpen(open);
+          if (!open) setPendingVersionNo(null);
+        }}
+        title="Discard Unsaved Changes?"
+        description="You have unsaved changes. Switching versions will discard them. Do you want to continue?"
+        confirmLabel="Discard & Switch"
+        destructive={true}
+        onConfirm={() => {
+          setIsVersionConfirmOpen(false);
+          if (pendingVersionNo !== null) {
+            setSelectedVersionNo(
+              pendingVersionNo === latestVersionNo ? null : pendingVersionNo,
+            );
+            setPendingVersionNo(null);
+          }
+        }}
+      />
 
       {/* Publish Confirmation Dialog */}
       <ConfirmDialog
@@ -687,15 +1495,48 @@ export function ContentEntryForm({ schema, entry }: ContentEntryFormProps) {
         }}
       />
 
+      {/* Translation Provider Settings Dialog */}
+      <TranslationSettingsDialog
+        open={isTranslationSettingsOpen}
+        onOpenChange={setIsTranslationSettingsOpen}
+        onConfigChange={setTranslationConfig}
+      />
+
       {entry ? (
-        <VersionHistoryDrawer
-          schemaSlug={schema.slug}
-          entryId={entry.id}
-          currentEntry={localizedEntry ?? entry}
-          schema={schema}
-          open={isVersionHistoryOpen}
-          onOpenChange={setIsVersionHistoryOpen}
-        />
+        <>
+          <VersionHistoryDrawer
+            schemaSlug={schema.slug}
+            entryId={entry.id}
+            currentEntry={localizedEntry ?? entry}
+            schema={schema}
+            open={isVersionHistoryOpen}
+            onOpenChange={setIsVersionHistoryOpen}
+          />
+
+          <WorkflowHistoryDrawer
+            schemaSlug={schema.slug}
+            entryId={entry.id}
+            open={isWorkflowHistoryOpen}
+            onOpenChange={setIsWorkflowHistoryOpen}
+          />
+
+          <WorkflowTransitionModal
+            open={isTransitionModalOpen}
+            onOpenChange={setIsTransitionModalOpen}
+            transition={pendingTransition}
+            currentStage={workflowState?.currentStage || null}
+            targetStageName={pendingTransition?.toStage}
+            onConfirm={(comment) => {
+              if (pendingTransition) {
+                transitionMutation.mutate({
+                  toStage: pendingTransition.toStage,
+                  comment,
+                });
+              }
+            }}
+            isPending={transitionMutation.isPending}
+          />
+        </>
       ) : null}
     </FormProvider>
   );
